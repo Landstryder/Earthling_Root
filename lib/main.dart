@@ -15,8 +15,9 @@ void main() async {
 class UserProfile {
   String name;
   double acreage;
-  String biome; // temperate, tropical, desert, boreal, grassland
+  String biome; // temperate, tropical, desert, boreal, grassland, coastal, mountain
   String urbanStatus; // urban, suburban, rural
+  String growingZone; // USDA hardiness zone (1-13)
   DateTime createdAt;
 
   UserProfile({
@@ -24,6 +25,7 @@ class UserProfile {
     this.acreage = 0.0,
     this.biome = 'temperate',
     this.urbanStatus = 'suburban',
+    this.growingZone = '5',
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -32,6 +34,7 @@ class UserProfile {
     'acreage': acreage,
     'biome': biome,
     'urbanStatus': urbanStatus,
+    'growingZone': growingZone,
     'createdAt': createdAt.toIso8601String(),
   };
 
@@ -40,6 +43,7 @@ class UserProfile {
     acreage: (json['acreage'] as num?)?.toDouble() ?? 0.0,
     biome: json['biome'] ?? 'temperate',
     urbanStatus: json['urbanStatus'] ?? 'suburban',
+    growingZone: json['growingZone'] ?? '5',
     createdAt: json['createdAt'] != null ? DateTime.parse(json['createdAt']) : null,
   );
 }
@@ -111,6 +115,62 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['community', 'land'],
       tradeoffDomains: ['body', 'joy'], // Less personal time/fun
       impactValue: 12,
+    ),
+  ];
+}
+
+// Default goals for Earthling way followers
+List<Goal> _getDefaultGoals() {
+  return [
+    // Finite goals
+    Goal(
+      id: 'goal_garden_bed',
+      title: 'Build first garden bed',
+      isInfinite: false,
+      targetProgress: 1,
+    ),
+    Goal(
+      id: 'goal_water_system',
+      title: 'Set up water system',
+      isInfinite: false,
+      targetProgress: 1,
+    ),
+    Goal(
+      id: 'goal_first_crop',
+      title: 'Plant and harvest first crop',
+      isInfinite: false,
+      targetProgress: 1,
+    ),
+    Goal(
+      id: 'goal_compost',
+      title: 'Establish compost system',
+      isInfinite: false,
+      targetProgress: 1,
+    ),
+    // Infinite goals
+    Goal(
+      id: 'goal_days_active',
+      title: 'Days checked in',
+      isInfinite: true,
+      currentProgress: 0,
+    ),
+    Goal(
+      id: 'goal_total_checkins',
+      title: 'Total check-ins',
+      isInfinite: true,
+      currentProgress: 0,
+    ),
+    Goal(
+      id: 'goal_land_hours',
+      title: 'Hours in Land domain',
+      isInfinite: true,
+      currentProgress: 0,
+    ),
+    Goal(
+      id: 'goal_tasks_completed',
+      title: 'Tasks completed',
+      isInfinite: true,
+      currentProgress: 0,
     ),
   ];
 }
@@ -199,6 +259,7 @@ class BalanceTask {
   final List<String> tradeoffDomains; // Domains that decrease (trade-off)
   final int impactValue;
   bool completed;
+  DateTime? completedAt; // Track when task was completed (for decay)
   final DateTime createdAt;
 
   BalanceTask({
@@ -208,6 +269,7 @@ class BalanceTask {
     required this.tradeoffDomains,
     required this.impactValue,
     this.completed = false,
+    this.completedAt,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -218,6 +280,7 @@ class BalanceTask {
         'tradeoffDomains': tradeoffDomains,
         'impactValue': impactValue,
         'completed': completed,
+        'completedAt': completedAt?.toIso8601String(),
         'createdAt': createdAt.toIso8601String(),
       };
 
@@ -228,8 +291,22 @@ class BalanceTask {
         tradeoffDomains: List<String>.from(json['tradeoffDomains'] ?? []),
         impactValue: json['impactValue'],
         completed: json['completed'] ?? false,
-        createdAt: DateTime.parse(json['createdAt']),
+        completedAt: json['completedAt'] != null ? DateTime.parse(json['completedAt']) : null,
+        createdAt: json['createdAt'] != null ? DateTime.parse(json['createdAt']) : DateTime.now(),
       );
+
+  /// Calculate impact multiplier based on time since completion (0.0 to 1.0)
+  /// Full value at completion, 50% after 24hrs, 0% after 72hrs (Sisyphus pattern)
+  double getImpactMultiplier() {
+    if (!completed || completedAt == null) return 0.0;
+    final hoursSinceCompletion = DateTime.now().difference(completedAt!).inHours;
+    if (hoursSinceCompletion < 24) return 1.0;
+    if (hoursSinceCompletion < 72) {
+      // Linear decay from 1.0 to 0.0 over 48 hours (24-72)
+      return max(0.0, 1.0 - ((hoursSinceCompletion - 24) / 48));
+    }
+    return 0.0;
+  }
 }
 
 class Goal {
@@ -295,6 +372,21 @@ class StorageService {
       // Add default tasks
       final defaultTasks = _getDefaultTasks();
       await saveTasks(defaultTasks);
+
+      // Add default goals
+      final defaultGoals = _getDefaultGoals();
+      await saveGoals(defaultGoals);
+
+      // Initialize timestamps
+      await saveLastCheckIn(DateTime.now());
+      await saveLastScoreDecay(DateTime.now());
+    } else {
+      // Existing user - ensure goals exist
+      final goals = getGoals();
+      if (goals.isEmpty) {
+        final defaultGoals = _getDefaultGoals();
+        await saveGoals(defaultGoals);
+      }
     }
   }
 
@@ -402,6 +494,45 @@ class StorageService {
 
   static Duration getTimeSinceCheckIn() {
     return DateTime.now().difference(getLastCheckIn());
+  }
+
+  static bool canCheckIn() {
+    return getTimeSinceCheckIn().inMinutes >= 15;
+  }
+
+  static int getMinutesUntilNextCheckIn() {
+    final minElapsed = getTimeSinceCheckIn().inMinutes;
+    if (minElapsed >= 15) return 0;
+    return 15 - minElapsed;
+  }
+
+  // Score decay tracking
+  static Future<void> saveLastScoreDecay(DateTime time) async {
+    if (_prefs == null) return;
+    await _prefs!.setString('lastScoreDecay', time.toIso8601String());
+  }
+
+  static DateTime getLastScoreDecay() {
+    if (_prefs == null) return DateTime.now();
+    final json = _prefs!.getString('lastScoreDecay');
+    if (json == null) return DateTime.now();
+    return DateTime.parse(json);
+  }
+
+  /// Apply score decay to all domains
+  /// 2 points per hour of inactivity
+  static Future<void> applyScoreDecay(List<Domain> domains) async {
+    final hoursElapsed = DateTime.now().difference(getLastScoreDecay()).inMinutes / 60.0;
+    if (hoursElapsed < 1) return; // Only decay if at least 1 hour has passed
+    
+    const decayRate = 2.0; // points per hour
+    final decayAmount = hoursElapsed * decayRate;
+    
+    for (var domain in domains) {
+      domain.value = max(0.0, domain.value - decayAmount);
+    }
+    
+    await saveLastScoreDecay(DateTime.now());
   }
 }
 
@@ -628,20 +759,58 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    _initializeScreen();
+  }
+
+  Future<void> _initializeScreen() async {
     domains = StorageService.getDomains();
+    
+    // Apply score decay
+    await StorageService.applyScoreDecay(domains);
+    await StorageService.saveDomains(domains);
+    
     tasks = StorageService.getTasks();
     selectedTasks = List<bool>.filled(tasks.length, false);
-    _checkIfShouldPromptCheckIn();
+    
+    // Trigger check-in prompt only if it's been a while
+    if (mounted) {
+      setState(() {});
+      _checkIfShouldPromptCheckIn();
+    }
   }
 
   void _checkIfShouldPromptCheckIn() {
     final timeSinceCheckIn = StorageService.getTimeSinceCheckIn();
-    // Prompt if more than 4 hours have passed
-    if (timeSinceCheckIn.inHours >= 4) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _showCheckInDialog();
-      });
-    }
+    // Only prompt if user has waited long enough AND hasn't been prompted recently
+    // For now, we'll just let the button guide them
+  }
+
+  Widget _buildCheckInButton() {
+    final canCheckIn = StorageService.canCheckIn();
+    final minutesUntil = StorageService.getMinutesUntilNextCheckIn();
+
+    return ElevatedButton.icon(
+      onPressed: canCheckIn ? () => _showCheckInDialog() : null,
+      icon: const Icon(Icons.assignment_turned_in),
+      label: Text(canCheckIn ? 'Check In Now' : 'Check In Available in ${minutesUntil}m'),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: canCheckIn ? Colors.green : Colors.grey[300],
+        foregroundColor: canCheckIn ? Colors.white : Colors.grey[600],
+        disabledBackgroundColor: Colors.grey[300],
+        disabledForegroundColor: Colors.grey[600],
+      ),
+    );
+  }
+
+  Widget _buildCheckInTimeDisplay() {
+    final duration = StorageService.getTimeSinceCheckIn();
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes % 60;
+    
+    return Text(
+      'Last check-in: ${hours}h ${minutes}m ago',
+      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
+    );
   }
 
   String _getTodayTheme() {
@@ -680,52 +849,41 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _showCheckInDialog() {
     final timeSinceCheckIn = StorageService.getTimeSinceCheckIn();
-    final hoursAgo = timeSinceCheckIn.inHours;
-    final minutesAgo = timeSinceCheckIn.inMinutes % 60;
+    final hoursElapsed = timeSinceCheckIn.inMinutes / 60.0;
+    
+    // Reset selected domains
+    final selectedDomains = <String>{};
     
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Check In'),
+          title: const Text('What did you focus on?'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'What have you done since your last check-in?',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
+                  'Since your last check-in (${timeSinceCheckIn.inHours}h ${timeSinceCheckIn.inMinutes % 60}m ago), which domains did you spend time on?',
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
-                Text(
-                  'Last check-in: ${hoursAgo > 0 ? '$hoursAgo hr${hoursAgo > 1 ? 's' : ''} ' : ''}${minutesAgo} min ago',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
-                ),
-                const SizedBox(height: 12.0),
-                Text(
-                  'Select activities:',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 8.0),
-                ...List.generate(tasks.length, (index) {
-                  final task = tasks[index];
-                  return CheckboxListTile(
-                    title: Text(task.title, style: const TextStyle(fontSize: 12)),
-                    subtitle: Text(
-                      task.benefitDomains.map((id) => domains.firstWhere((d) => d.id == id).name).join(', '),
-                      style: const TextStyle(fontSize: 10),
-                    ),
-                    value: selectedTasks[index],
-                    onChanged: (value) {
-                      setDialogState(() {
-                        selectedTasks[index] = value ?? false;
-                      });
-                    },
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                  );
-                }),
+                const SizedBox(height: 16.0),
+                ...domains.map((domain) => CheckboxListTile(
+                  title: Text(domain.name, style: TextStyle(fontWeight: FontWeight.w600, color: domain.color)),
+                  value: selectedDomains.contains(domain.id),
+                  onChanged: (value) {
+                    setDialogState(() {
+                      if (value == true) {
+                        selectedDomains.add(domain.id);
+                      } else {
+                        selectedDomains.remove(domain.id);
+                      }
+                    });
+                  },
+                  dense: true,
+                )),
               ],
             ),
           ),
@@ -733,18 +891,16 @@ class _HomeScreenState extends State<HomeScreen> {
             TextButton(
               onPressed: () {
                 Navigator.pop(context);
-                _updateDomainsFromCheckIn();
-                StorageService.saveLastCheckIn(DateTime.now());
+                _completeCheckIn(selectedDomains, hoursElapsed, markTasks: false);
               },
-              child: const Text('Skip (no progress)'),
+              child: const Text('Skip'),
             ),
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                _updateDomainsFromCheckIn();
-                StorageService.saveLastCheckIn(DateTime.now());
+                _completeCheckIn(selectedDomains, hoursElapsed, markTasks: true);
               },
-              child: const Text('Complete Check-In'),
+              child: const Text('Complete'),
             ),
           ],
         ),
@@ -752,26 +908,43 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _updateDomainsFromCheckIn() {
+  void _completeCheckIn(Set<String> selectedDomainIds, double hoursElapsed, {required bool markTasks}) {
     setState(() {
-      for (int i = 0; i < selectedTasks.length; i++) {
-        if (selectedTasks[i]) {
-          final task = tasks[i];
-          // Apply benefits
-          for (var domainId in task.benefitDomains) {
-            final domain = domains.firstWhere((d) => d.id == domainId);
-            domain.value = (domain.value + task.impactValue).clamp(0.0, 100.0);
-          }
-          // Apply trade-offs (reduce other domains)
-          for (var domainId in task.tradeoffDomains) {
-            final domain = domains.firstWhere((d) => d.id == domainId);
-            domain.value = (domain.value - (task.impactValue * 0.5)).clamp(0.0, 100.0);
+      // Calculate points based on time elapsed
+      double pointMultiplier;
+      if (hoursElapsed < 1) {
+        pointMultiplier = 1.0; // 15-60 min = small gain
+      } else if (hoursElapsed < 3) {
+        pointMultiplier = 1.5; // 1-3 hrs = medium gain
+      } else {
+        pointMultiplier = 2.0; // 3+ hrs = larger gain
+      }
+
+      // Award points for selected domains
+      for (var domainId in selectedDomainIds) {
+        final domain = domains.firstWhere((d) => d.id == domainId);
+        domain.value = min(100.0, domain.value + (5 * pointMultiplier));
+      }
+
+      // Auto-complete relevant tasks if selected
+      if (markTasks) {
+        for (var task in tasks) {
+          if (task.completed) continue; // Skip already completed tasks
+          
+          // Check if task benefits from selected domains
+          final benefitsSelected = task.benefitDomains.any((id) => selectedDomainIds.contains(id));
+          if (benefitsSelected) {
+            task.completed = true;
+            task.completedAt = DateTime.now();
           }
         }
       }
-      selectedTasks = List<bool>.filled(tasks.length, false);
     });
+
+    // Save updated state
     StorageService.saveDomains(domains);
+    StorageService.saveTasks(tasks);
+    StorageService.saveLastCheckIn(DateTime.now());
   }
 
   @override
@@ -790,16 +963,9 @@ class _HomeScreenState extends State<HomeScreen> {
               Center(
                 child: Column(
                   children: [
-                    ElevatedButton.icon(
-                      onPressed: _showCheckInDialog,
-                      icon: const Icon(Icons.assignment_turned_in),
-                      label: const Text('Check In Now'),
-                    ),
+                    _buildCheckInButton(),
                     const SizedBox(height: 8.0),
-                    Text(
-                      'Time since last check-in: ${StorageService.getTimeSinceCheckIn().inHours}h ${StorageService.getTimeSinceCheckIn().inMinutes % 60}m',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
-                    ),
+                    _buildCheckInTimeDisplay(),
                   ],
                 ),
               ),
@@ -1148,6 +1314,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onChanged: (value) {
                   setState(() {
                     profile.urbanStatus = value ?? 'suburban';
+                  });
+                },
+              ),
+              const SizedBox(height: 12.0),
+              
+              // Growing Zone
+              Text('Growing Zone (USDA)', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8.0),
+              DropdownButton<String>(
+                isExpanded: true,
+                value: profile.growingZone,
+                items: const [
+                  DropdownMenuItem(value: '1', child: Text('Zone 1 (-50°F and below)')),
+                  DropdownMenuItem(value: '2', child: Text('Zone 2 (-40°F to -50°F)')),
+                  DropdownMenuItem(value: '3', child: Text('Zone 3 (-30°F to -40°F)')),
+                  DropdownMenuItem(value: '4', child: Text('Zone 4 (-20°F to -30°F)')),
+                  DropdownMenuItem(value: '5', child: Text('Zone 5 (-10°F to -20°F)')),
+                  DropdownMenuItem(value: '6', child: Text('Zone 6 (0°F to -10°F)')),
+                  DropdownMenuItem(value: '7', child: Text('Zone 7 (10°F to 0°F)')),
+                  DropdownMenuItem(value: '8', child: Text('Zone 8 (20°F to 10°F)')),
+                  DropdownMenuItem(value: '9', child: Text('Zone 9 (30°F to 20°F)')),
+                  DropdownMenuItem(value: '10', child: Text('Zone 10 (40°F to 30°F)')),
+                  DropdownMenuItem(value: '11', child: Text('Zone 11 (45°F to 40°F)')),
+                  DropdownMenuItem(value: '12', child: Text('Zone 12 (50°F to 45°F)')),
+                  DropdownMenuItem(value: '13', child: Text('Zone 13 (60°F and above)')),
+                ],
+                onChanged: (value) {
+                  setState(() {
+                    profile.growingZone = value ?? '5';
                   });
                 },
               ),
