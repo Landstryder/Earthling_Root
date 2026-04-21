@@ -58,6 +58,7 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['land'],
       tradeoffDomains: ['body', 'joy'], // Time spent instead of physical/fun activity
       impactValue: 12,
+      weeklyTheme: 'Water', // Wednesday
     ),
     BalanceTask(
       id: 'daily_2',
@@ -65,6 +66,7 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['body'],
       tradeoffDomains: ['mind', 'community'], // Time away from learning/social
       impactValue: 12,
+      weeklyTheme: 'Growth', // Monday
     ),
     BalanceTask(
       id: 'daily_3',
@@ -72,6 +74,7 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['body', 'land'],
       tradeoffDomains: ['community'], // Less convenience, harder social eating
       impactValue: 10,
+      weeklyTheme: 'Growth',
     ),
     BalanceTask(
       id: 'daily_4',
@@ -79,6 +82,7 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['mind', 'joy'],
       tradeoffDomains: ['community', 'body'], // Solitude vs. movement/connection
       impactValue: 10,
+      weeklyTheme: 'Rest',
     ),
     BalanceTask(
       id: 'daily_5',
@@ -86,6 +90,7 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['land', 'body', 'joy'],
       tradeoffDomains: ['mind', 'community'], // Less productivity/social time
       impactValue: 15,
+      weeklyTheme: 'Growth',
     ),
     BalanceTask(
       id: 'daily_6',
@@ -93,6 +98,7 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['community', 'joy'],
       tradeoffDomains: ['land', 'mind'], // Less personal projects/learning time
       impactValue: 12,
+      weeklyTheme: 'Community',
     ),
     // Weekly tasks
     BalanceTask(
@@ -101,6 +107,7 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['land'],
       tradeoffDomains: ['joy', 'community'], // Extra effort vs. fun activities
       impactValue: 8,
+      weeklyTheme: 'Repair',
     ),
     BalanceTask(
       id: 'weekly_2',
@@ -108,6 +115,7 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['mind', 'land'],
       tradeoffDomains: ['body', 'joy'], // Sedentary/serious vs. movement/fun
       impactValue: 10,
+      weeklyTheme: 'Experiment',
     ),
     BalanceTask(
       id: 'weekly_3',
@@ -115,6 +123,15 @@ List<BalanceTask> _getDefaultTasks() {
       benefitDomains: ['community', 'land'],
       tradeoffDomains: ['body', 'joy'], // Less personal time/fun
       impactValue: 12,
+      weeklyTheme: 'Community',
+    ),
+    BalanceTask(
+      id: 'weekly_4',
+      title: 'Deep work on a project',
+      benefitDomains: ['mind', 'joy'],
+      tradeoffDomains: ['body', 'community'],
+      impactValue: 14,
+      weeklyTheme: 'Deep Work',
     ),
   ];
 }
@@ -261,6 +278,7 @@ class BalanceTask {
   bool completed;
   DateTime? completedAt; // Track when task was completed (for decay)
   final DateTime createdAt;
+  final String? weeklyTheme; // Optional: Monday→Growth, Tuesday→Repair, etc.
 
   BalanceTask({
     required this.id,
@@ -271,6 +289,7 @@ class BalanceTask {
     this.completed = false,
     this.completedAt,
     DateTime? createdAt,
+    this.weeklyTheme,
   }) : createdAt = createdAt ?? DateTime.now();
 
   Map<String, dynamic> toJson() => {
@@ -282,6 +301,7 @@ class BalanceTask {
         'completed': completed,
         'completedAt': completedAt?.toIso8601String(),
         'createdAt': createdAt.toIso8601String(),
+        'weeklyTheme': weeklyTheme,
       };
 
   factory BalanceTask.fromJson(Map<String, dynamic> json) => BalanceTask(
@@ -293,6 +313,7 @@ class BalanceTask {
         completed: json['completed'] ?? false,
         completedAt: json['completedAt'] != null ? DateTime.parse(json['completedAt']) : null,
         createdAt: json['createdAt'] != null ? DateTime.parse(json['createdAt']) : DateTime.now(),
+        weeklyTheme: json['weeklyTheme'],
       );
 
   /// Calculate impact multiplier based on time since completion (0.0 to 1.0)
@@ -560,7 +581,7 @@ class _EarthlingRootAppState extends State<EarthlingRootApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Earthling Root v0.3',
+      title: 'Earthling Root v0.5',
       theme: ThemeData(
         primaryColor: _getPrimaryColor(),
         useMaterial3: true,
@@ -755,6 +776,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late List<Domain> domains;
   late List<BalanceTask> tasks;
   late List<bool> selectedTasks;
+  bool _initialized = false;
 
   @override
   void initState() {
@@ -772,17 +794,61 @@ class _HomeScreenState extends State<HomeScreen> {
     tasks = StorageService.getTasks();
     selectedTasks = List<bool>.filled(tasks.length, false);
     
-    // Trigger check-in prompt only if it's been a while
     if (mounted) {
-      setState(() {});
-      _checkIfShouldPromptCheckIn();
+      setState(() {
+        _initialized = true;
+      });
     }
   }
 
-  void _checkIfShouldPromptCheckIn() {
-    final timeSinceCheckIn = StorageService.getTimeSinceCheckIn();
-    // Only prompt if user has waited long enough AND hasn't been prompted recently
-    // For now, we'll just let the button guide them
+  /// Get weekly theme for today
+  String _getWeeklyTheme() {
+    final weekday = DateTime.now().weekday;
+    const themes = {
+      1: 'Growth',      // Monday
+      2: 'Repair',      // Tuesday
+      3: 'Water',       // Wednesday
+      4: 'Experiment',  // Thursday
+      5: 'Community',   // Friday
+      6: 'Deep Work',   // Saturday
+      7: 'Rest',        // Sunday
+    };
+    return themes[weekday] ?? 'Balance';
+  }
+
+  /// Get day name for display
+  String _getDayName() {
+    const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    return days[DateTime.now().weekday - 1];
+  }
+
+  /// Get 2-3 suggested tasks for today based on lowest domains + weekly theme
+  List<BalanceTask> _getSuggestedTasks() {
+    final theme = _getWeeklyTheme();
+    
+    // Find 2 lowest-balance domains
+    final sortedDomains = [...domains];
+    sortedDomains.sort((a, b) => a.value.compareTo(b.value));
+    final lowestDomainIds = sortedDomains.take(2).map((d) => d.id).toSet();
+    
+    // Filter tasks that match theme or benefit low domains
+    final suggestedTasks = tasks
+        .where((task) {
+          // Don't suggest completed tasks
+          if (task.completed) return false;
+          
+          // Match weekly theme
+          if (task.weeklyTheme == theme) return true;
+          
+          // Match lowest balance domains
+          if (task.benefitDomains.any((id) => lowestDomainIds.contains(id))) return true;
+          
+          return false;
+        })
+        .toList();
+    
+    // Return top 2-3 suggestions
+    return suggestedTasks.take(3).toList();
   }
 
   Widget _buildCheckInButton() {
@@ -792,12 +858,13 @@ class _HomeScreenState extends State<HomeScreen> {
     return ElevatedButton.icon(
       onPressed: canCheckIn ? () => _showCheckInDialog() : null,
       icon: const Icon(Icons.assignment_turned_in),
-      label: Text(canCheckIn ? 'Check In Now' : 'Check In Available in ${minutesUntil}m'),
+      label: Text(canCheckIn ? 'Check In Now' : 'Check In in ${minutesUntil}m'),
       style: ElevatedButton.styleFrom(
         backgroundColor: canCheckIn ? Colors.green : Colors.grey[300],
         foregroundColor: canCheckIn ? Colors.white : Colors.grey[600],
         disabledBackgroundColor: Colors.grey[300],
         disabledForegroundColor: Colors.grey[600],
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
       ),
     );
   }
@@ -813,37 +880,24 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  String _getTodayTheme() {
-    final now = DateTime.now();
-    final weekday = now.weekday;
-    final themes = [
-      'Monday Momentum',
-      'Tuesday Growth',
-      'Wednesday Harmony',
-      'Thursday Gratitude',
-      'Friday Freedom',
-      'Saturday Celebration',
-      'Sunday Stillness',
-    ];
-    return themes[weekday - 1];
-  }
-
-  String _getBalanceMessage() {
+  String _getSimpleFeedback() {
     double avg = domains.fold(0.0, (sum, d) => sum + d.value) / domains.length;
-    double maxDiff = 0;
-    for (var d in domains) {
-      maxDiff = maxDiff > (d.value - avg).abs() ? maxDiff : (d.value - avg).abs();
-    }
-
-    if (avg < 30) {
-      return '🌙 You seem depleted. Rest and nurture yourself.';
-    } else if (maxDiff > 40) {
-      final lowest = domains.reduce((a, b) => a.value < b.value ? a : b);
-      return '⚠️ ${lowest.name} is being neglected.';
+    final sortedDomains = [...domains];
+    sortedDomains.sort((a, b) => a.value.compareTo(b.value));
+    
+    final lowestDomain = sortedDomains.first;
+    final maxDiff = (sortedDomains.last.value - sortedDomains.first.value).abs();
+    
+    if (avg < 25) {
+      return 'You are depleted. Rest and nurture yourself.';
+    } else if (avg < 40) {
+      return '${lowestDomain.name} needs your attention.';
+    } else if (maxDiff > 50) {
+      return 'Drift detected in ${lowestDomain.name}.';
     } else if (maxDiff < 15) {
-      return '✨ You are in harmony.';
+      return 'You are in balance.';
     } else {
-      return '⚡ Working towards balance.';
+      return 'Working towards harmony.';
     }
   }
 
@@ -851,25 +905,27 @@ class _HomeScreenState extends State<HomeScreen> {
     final timeSinceCheckIn = StorageService.getTimeSinceCheckIn();
     final hoursElapsed = timeSinceCheckIn.inMinutes / 60.0;
     
-    // Reset selected domains
     final selectedDomains = <String>{};
+    String selectedIntensity = 'Medium'; // Default
     
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('What did you focus on?'),
+          title: const Text('What did you give your time to?'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Since your last check-in (${timeSinceCheckIn.inHours}h ${timeSinceCheckIn.inMinutes % 60}m ago), which domains did you spend time on?',
+                  'Since your last check-in (${timeSinceCheckIn.inHours}h ${timeSinceCheckIn.inMinutes % 60}m ago)',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 const SizedBox(height: 16.0),
+                
+                // Domain selection
                 ...domains.map((domain) => CheckboxListTile(
                   title: Text(domain.name, style: TextStyle(fontWeight: FontWeight.w600, color: domain.color)),
                   value: selectedDomains.contains(domain.id),
@@ -884,21 +940,38 @@ class _HomeScreenState extends State<HomeScreen> {
                   },
                   dense: true,
                 )),
+                
+                const SizedBox(height: 16.0),
+                
+                // Intensity selector
+                Text('Intensity', style: Theme.of(context).textTheme.labelMedium?.copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8.0),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: ['Low', 'Medium', 'High'].map((intensity) {
+                    return ChoiceChip(
+                      label: Text(intensity),
+                      selected: selectedIntensity == intensity,
+                      onSelected: (selected) {
+                        setDialogState(() {
+                          if (selected) selectedIntensity = intensity;
+                        });
+                      },
+                    );
+                  }).toList(),
+                ),
               ],
             ),
           ),
           actions: [
             TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-                _completeCheckIn(selectedDomains, hoursElapsed, markTasks: false);
-              },
-              child: const Text('Skip'),
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
             ),
             ElevatedButton(
               onPressed: () {
                 Navigator.pop(context);
-                _completeCheckIn(selectedDomains, hoursElapsed, markTasks: true);
+                _completeCheckIn(selectedDomains, hoursElapsed, selectedIntensity);
               },
               child: const Text('Complete'),
             ),
@@ -908,129 +981,233 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _completeCheckIn(Set<String> selectedDomainIds, double hoursElapsed, {required bool markTasks}) {
+  void _completeCheckIn(Set<String> selectedDomainIds, double hoursElapsed, String intensity) {
     setState(() {
-      // Calculate points based on time elapsed
-      double pointMultiplier;
+      // Calculate base multiplier based on time elapsed
+      double timeMultiplier;
       if (hoursElapsed < 1) {
-        pointMultiplier = 1.0; // 15-60 min = small gain
+        timeMultiplier = 1.0; // 15-60 min = small gain
       } else if (hoursElapsed < 3) {
-        pointMultiplier = 1.5; // 1-3 hrs = medium gain
+        timeMultiplier = 1.5; // 1-3 hrs = medium gain
       } else {
-        pointMultiplier = 2.0; // 3+ hrs = larger gain
+        timeMultiplier = 2.0; // 3+ hrs = larger gain
       }
+
+      // Intensity multiplier (Low=0.5, Medium=1.0, High=1.5)
+      final intensityMultiplier = intensity == 'Low' ? 0.5 : intensity == 'High' ? 1.5 : 1.0;
 
       // Award points for selected domains
       for (var domainId in selectedDomainIds) {
         final domain = domains.firstWhere((d) => d.id == domainId);
-        domain.value = min(100.0, domain.value + (5 * pointMultiplier));
+        final pointGain = 5 * timeMultiplier * intensityMultiplier;
+        domain.value = min(100.0, domain.value + pointGain);
       }
 
-      // Auto-complete relevant tasks if selected
-      if (markTasks) {
-        for (var task in tasks) {
-          if (task.completed) continue; // Skip already completed tasks
-          
-          // Check if task benefits from selected domains
-          final benefitsSelected = task.benefitDomains.any((id) => selectedDomainIds.contains(id));
-          if (benefitsSelected) {
-            task.completed = true;
-            task.completedAt = DateTime.now();
-          }
+      // Auto-complete relevant tasks
+      for (var task in tasks) {
+        if (task.completed) continue;
+        
+        final benefitsSelected = task.benefitDomains.any((id) => selectedDomainIds.contains(id));
+        if (benefitsSelected) {
+          task.completed = true;
+          task.completedAt = DateTime.now();
         }
       }
     });
 
-    // Save updated state
     StorageService.saveDomains(domains);
     StorageService.saveTasks(tasks);
     StorageService.saveLastCheckIn(DateTime.now());
   }
 
+  void _quickCompleteTask(BalanceTask task) {
+    setState(() {
+      task.completed = true;
+      task.completedAt = DateTime.now();
+      
+      // Award points to benefit domains
+      for (var domainId in task.benefitDomains) {
+        final domain = domains.firstWhere((d) => d.id == domainId);
+        domain.value = min(100.0, domain.value + (task.impactValue * 0.75).toDouble());
+      }
+      
+      // Apply tradeoffs
+      for (var domainId in task.tradeoffDomains) {
+        final domain = domains.firstWhere((d) => d.id == domainId);
+        domain.value = max(0.0, domain.value - (task.impactValue * 0.3).toDouble());
+      }
+    });
+
+    StorageService.saveDomains(domains);
+    StorageService.saveTasks(tasks);
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Completed: ${task.title}'), duration: const Duration(seconds: 2)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (!_initialized) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Earthling Root v0.5')),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
     final values = domains.map((d) => d.value).toList();
+    final suggestedTasks = _getSuggestedTasks();
     
     return Scaffold(
-      appBar: AppBar(title: const Text('Earthling Root v0.4')),
+      appBar: AppBar(
+        title: const Text('Earthling Root v0.5'),
+        elevation: 0,
+        centerTitle: true,
+      ),
       body: SingleChildScrollView(
         child: Padding(
           padding: const EdgeInsets.all(16.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Check-in button and time indicator
+              // Radar Chart (PRIMARY)
               Center(
                 child: Column(
                   children: [
-                    _buildCheckInButton(),
+                    SizedBox(
+                      width: 280,
+                      height: 280,
+                      child: CustomPaint(
+                        painter: RadarChartPainter(domains: domains, values: values),
+                      ),
+                    ),
                     const SizedBox(height: 8.0),
                     _buildCheckInTimeDisplay(),
                   ],
                 ),
               ),
-              const SizedBox(height: 24.0),
+              const SizedBox(height: 20.0),
 
-              // Today's theme and message
-              Container(
-                padding: const EdgeInsets.all(12.0),
-                decoration: BoxDecoration(color: Colors.green[50], borderRadius: BorderRadius.circular(8.0)),
+              // Balance Bars (SECONDARY)
+              Text('Your Balance', style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600, color: Colors.grey[600])),
+              const SizedBox(height: 12.0),
+              ...domains.map((d) => Padding(
+                padding: const EdgeInsets.only(bottom: 10.0),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Today: ${_getTodayTheme()}', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 8.0),
-                    Text(_getBalanceMessage(), style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.green[700])),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24.0),
-
-              // Radar Chart
-              Text('Life Balance Radar', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16.0),
-              Center(
-                child: SizedBox(
-                  width: 300,
-                  height: 300,
-                  child: CustomPaint(
-                    painter: RadarChartPainter(domains: domains, values: values),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24.0),
-
-              // Domain values as cards
-              Text('Domain Values', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 12.0),
-              ...domains.map((d) => Padding(
-                padding: const EdgeInsets.only(bottom: 8.0),
-                child: Row(
-                  children: [
-                    Icon(d.icon, color: d.color, size: 24),
-                    const SizedBox(width: 12.0),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(d.name, style: const TextStyle(fontWeight: FontWeight.w600)),
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(4.0),
-                            child: LinearProgressIndicator(
-                              value: d.value / 100,
-                              minHeight: 8.0,
-                              backgroundColor: d.color.withOpacity(0.1),
-                              valueColor: AlwaysStoppedAnimation<Color>(d.color),
-                            ),
-                          ),
-                        ],
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(d.icon, color: d.color, size: 18),
+                            const SizedBox(width: 8.0),
+                            Text(d.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                          ],
+                        ),
+                        Text(d.value.toStringAsFixed(0), style: TextStyle(fontWeight: FontWeight.bold, color: d.color, fontSize: 13)),
+                      ],
+                    ),
+                    const SizedBox(height: 4.0),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(3.0),
+                      child: LinearProgressIndicator(
+                        value: d.value / 100,
+                        minHeight: 6.0,
+                        backgroundColor: d.color.withOpacity(0.15),
+                        valueColor: AlwaysStoppedAnimation<Color>(d.color),
                       ),
                     ),
-                    const SizedBox(width: 12.0),
-                    Text(d.value.toStringAsFixed(0), style: TextStyle(fontWeight: FontWeight.bold, color: d.color, fontSize: 14)),
                   ],
                 ),
               )),
+              const SizedBox(height: 20.0),
+
+              // Feedback Message
+              Container(
+                padding: const EdgeInsets.all(12.0),
+                decoration: BoxDecoration(
+                  color: Colors.green[50],
+                  borderRadius: BorderRadius.circular(8.0),
+                  border: Border.all(color: Colors.green[200]!, width: 1),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${_getDayName()} - ${_getWeeklyTheme()}',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.green[700],
+                      ),
+                    ),
+                    const SizedBox(height: 6.0),
+                    Text(
+                      _getSimpleFeedback(),
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Colors.green[800],
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20.0),
+
+              // Check-in Button
+              Center(
+                child: _buildCheckInButton(),
+              ),
+              const SizedBox(height: 24.0),
+
+              // Suggested Tasks
+              if (suggestedTasks.isNotEmpty) ...[
+                Text(
+                  'Today\'s Rituals',
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600, color: Colors.grey[600]),
+                ),
+                const SizedBox(height: 12.0),
+                ...suggestedTasks.map((task) => Card(
+                  margin: const EdgeInsets.only(bottom: 10.0),
+                  elevation: 0,
+                  color: Colors.blue[50],
+                  child: Padding(
+                    padding: const EdgeInsets.all(12.0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                task.title,
+                                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                              ),
+                              const SizedBox(height: 4.0),
+                              if (task.weeklyTheme != null)
+                                Text(
+                                  'Theme: ${task.weeklyTheme}',
+                                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                                ),
+                            ],
+                          ),
+                        ),
+                        ElevatedButton(
+                          onPressed: () => _quickCompleteTask(task),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue[300],
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          ),
+                          child: const Text('Done', style: TextStyle(fontSize: 12)),
+                        ),
+                      ],
+                    ),
+                  ),
+                )),
+                const SizedBox(height: 12.0),
+              ],
             ],
           ),
         ),
@@ -1397,7 +1574,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               Text('About', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
               const SizedBox(height: 12.0),
               Text(
-                'Earthling Root v0.3\n\nA life balance tracker inspired by the Earthling Way philosophy. Balance your five life domains: Land, Mind, Body, Community, and Joy.',
+                'Earthling Root v0.5\n\nA life balance tracker inspired by the Earthling Way philosophy. Balance your five life domains: Land, Mind, Body, Community, and Joy.\n\nWeekly themes guide your daily rituals.',
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
             ],

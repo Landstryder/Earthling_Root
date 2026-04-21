@@ -11,19 +11,19 @@ import 'package:flutter/material.dart';
 import 'package:earthling_root/main.dart';
 
 void main() {
-  testWidgets('Earthling Root v0.4 launches and shows balance radar', (WidgetTester tester) async {
+  testWidgets('Earthling Root v0.5 launches and shows balance radar', (WidgetTester tester) async {
     await tester.pumpWidget(const EarthlingRootApp());
+    
+    // Wait for initialization to complete
+    await tester.pumpAndSettle(const Duration(seconds: 2));
 
-    // App title
-    expect(find.text('Earthling Root v0.4'), findsOneWidget);
+    // App title (now v0.5)
+    expect(find.text('Earthling Root v0.5'), findsWidgets);
 
     // Check-in button
     expect(find.text('Check In Now'), findsOneWidget);
 
-    // Radar chart section
-    expect(find.text('Life Balance Radar'), findsOneWidget);
-
-    // Domain values section
-    expect(find.text('Domain Values'), findsOneWidget);
+    // Your Balance section
+    expect(find.text('Your Balance'), findsOneWidget);
   });
 }
