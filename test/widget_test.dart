@@ -6,22 +6,22 @@
 // tree, read text, and verify that the values of widget properties are correct.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 
 import 'package:earthling_root/main.dart';
 
 void main() {
-  testWidgets('Earthling Root app launches correctly', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
+  testWidgets('Earthling Root v0.2 launches and shows balance', (WidgetTester tester) async {
     await tester.pumpWidget(const EarthlingRootApp());
 
-    // Verify that the app title is displayed.
+    // App title
     expect(find.text('Earthling Root'), findsWidgets);
 
-    // Verify that tasks are displayed.
-    expect(find.text('Check chickens'), findsOneWidget);
-    expect(find.text('Water plants'), findsOneWidget);
+    // Balance section
+    expect(find.text('Life Balance'), findsOneWidget);
 
-    // Verify that the reset button is displayed.
-    expect(find.text('Reset Day'), findsOneWidget);
+    // Tasks header and add button
+    expect(find.text('Daily Tasks'), findsOneWidget);
+    expect(find.byIcon(Icons.add), findsWidgets);
   });
 }
