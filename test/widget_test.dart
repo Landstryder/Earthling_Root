@@ -11,17 +11,19 @@ import 'package:flutter/material.dart';
 import 'package:earthling_root/main.dart';
 
 void main() {
-  testWidgets('Earthling Root v0.2 launches and shows balance', (WidgetTester tester) async {
+  testWidgets('Earthling Root v0.4 launches and shows balance radar', (WidgetTester tester) async {
     await tester.pumpWidget(const EarthlingRootApp());
 
     // App title
-    expect(find.text('Earthling Root'), findsWidgets);
+    expect(find.text('Earthling Root v0.4'), findsOneWidget);
 
-    // Balance section
-    expect(find.text('Life Balance'), findsOneWidget);
+    // Check-in button
+    expect(find.text('Check In Now'), findsOneWidget);
 
-    // Tasks header and add button
-    expect(find.text('Daily Tasks'), findsOneWidget);
-    expect(find.byIcon(Icons.add), findsWidgets);
+    // Radar chart section
+    expect(find.text('Life Balance Radar'), findsOneWidget);
+
+    // Domain values section
+    expect(find.text('Domain Values'), findsOneWidget);
   });
 }

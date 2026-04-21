@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
+import 'dart:math';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -43,63 +44,72 @@ class UserProfile {
   );
 }
 
-// Default tasks for earthling way followers
+// Default tasks for earthling way followers (with trade-off mechanics)
 List<BalanceTask> _getDefaultTasks() {
   return [
-    // Daily tasks
+    // Daily tasks - benefits listed first, then trade-offs
     BalanceTask(
       id: 'daily_1',
       title: 'Water plants & garden',
-      domainIds: ['land', 'mind'],
-      impactValue: 15,
+      benefitDomains: ['land'],
+      tradeoffDomains: ['body', 'joy'], // Time spent instead of physical/fun activity
+      impactValue: 12,
     ),
     BalanceTask(
       id: 'daily_2',
       title: 'Move your body (walk, stretch, yoga)',
-      domainIds: ['body', 'joy'],
+      benefitDomains: ['body'],
+      tradeoffDomains: ['mind', 'community'], // Time away from learning/social
       impactValue: 12,
     ),
     BalanceTask(
       id: 'daily_3',
       title: 'Eat locally/seasonally',
-      domainIds: ['body', 'land'],
+      benefitDomains: ['body', 'land'],
+      tradeoffDomains: ['community'], // Less convenience, harder social eating
       impactValue: 10,
     ),
     BalanceTask(
       id: 'daily_4',
       title: 'Meditate or reflect',
-      domainIds: ['mind', 'joy'],
+      benefitDomains: ['mind', 'joy'],
+      tradeoffDomains: ['community', 'body'], // Solitude vs. movement/connection
       impactValue: 10,
     ),
     BalanceTask(
       id: 'daily_5',
       title: 'Spend time in nature',
-      domainIds: ['land', 'body', 'joy'],
+      benefitDomains: ['land', 'body', 'joy'],
+      tradeoffDomains: ['mind', 'community'], // Less productivity/social time
       impactValue: 15,
     ),
     BalanceTask(
       id: 'daily_6',
       title: 'Connect with community',
-      domainIds: ['community', 'joy'],
+      benefitDomains: ['community', 'joy'],
+      tradeoffDomains: ['land', 'mind'], // Less personal projects/learning time
       impactValue: 12,
     ),
     // Weekly tasks
     BalanceTask(
       id: 'weekly_1',
       title: 'Composting & waste reduction',
-      domainIds: ['land'],
+      benefitDomains: ['land'],
+      tradeoffDomains: ['joy', 'community'], // Extra effort vs. fun activities
       impactValue: 8,
     ),
     BalanceTask(
       id: 'weekly_2',
       title: 'Study sustainable practices',
-      domainIds: ['mind', 'land'],
+      benefitDomains: ['mind', 'land'],
+      tradeoffDomains: ['body', 'joy'], // Sedentary/serious vs. movement/fun
       impactValue: 10,
     ),
     BalanceTask(
       id: 'weekly_3',
       title: 'Community service or gathering',
-      domainIds: ['community', 'land'],
+      benefitDomains: ['community', 'land'],
+      tradeoffDomains: ['body', 'joy'], // Less personal time/fun
       impactValue: 12,
     ),
   ];
@@ -185,7 +195,8 @@ List<Domain> _getDomainDefinitions() {
 class BalanceTask {
   final String id;
   final String title;
-  final List<String> domainIds;
+  final List<String> benefitDomains; // Domains that improve
+  final List<String> tradeoffDomains; // Domains that decrease (trade-off)
   final int impactValue;
   bool completed;
   final DateTime createdAt;
@@ -193,7 +204,8 @@ class BalanceTask {
   BalanceTask({
     required this.id,
     required this.title,
-    required this.domainIds,
+    required this.benefitDomains,
+    required this.tradeoffDomains,
     required this.impactValue,
     this.completed = false,
     DateTime? createdAt,
@@ -202,7 +214,8 @@ class BalanceTask {
   Map<String, dynamic> toJson() => {
         'id': id,
         'title': title,
-        'domainIds': domainIds,
+        'benefitDomains': benefitDomains,
+        'tradeoffDomains': tradeoffDomains,
         'impactValue': impactValue,
         'completed': completed,
         'createdAt': createdAt.toIso8601String(),
@@ -211,7 +224,8 @@ class BalanceTask {
   factory BalanceTask.fromJson(Map<String, dynamic> json) => BalanceTask(
         id: json['id'],
         title: json['title'],
-        domainIds: List<String>.from(json['domainIds']),
+        benefitDomains: List<String>.from(json['benefitDomains'] ?? json['domainIds'] ?? []),
+        tradeoffDomains: List<String>.from(json['tradeoffDomains'] ?? []),
         impactValue: json['impactValue'],
         completed: json['completed'] ?? false,
         createdAt: DateTime.parse(json['createdAt']),
@@ -372,6 +386,23 @@ class StorageService {
     if (_prefs == null) return;
     await _prefs!.clear();
   }
+
+  // Check-in tracking
+  static Future<void> saveLastCheckIn(DateTime time) async {
+    if (_prefs == null) return;
+    await _prefs!.setString('lastCheckIn', time.toIso8601String());
+  }
+
+  static DateTime getLastCheckIn() {
+    if (_prefs == null) return DateTime.now().subtract(const Duration(hours: 24));
+    final json = _prefs!.getString('lastCheckIn');
+    if (json == null) return DateTime.now().subtract(const Duration(hours: 24));
+    return DateTime.parse(json);
+  }
+
+  static Duration getTimeSinceCheckIn() {
+    return DateTime.now().difference(getLastCheckIn());
+  }
 }
 
 class EarthlingRootApp extends StatefulWidget {
@@ -419,6 +450,128 @@ class MainNavigator extends StatefulWidget {
 
   @override
   State<MainNavigator> createState() => _MainNavigatorState();
+}
+
+// Radar Chart Painter for balance visualization
+class RadarChartPainter extends CustomPainter {
+  final List<Domain> domains;
+  final List<double> values; // 0-100 for each domain
+
+  RadarChartPainter({required this.domains, required this.values});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = min(size.width, size.height) / 2 - 20;
+    final numDomains = domains.length;
+    final angleSlice = (2 * 3.14159) / numDomains;
+
+    // Draw concentric circles (background grid)
+    for (int i = 1; i <= 5; i++) {
+      final r = radius * (i / 5);
+      canvas.drawCircle(
+        center,
+        r,
+        Paint()
+          ..color = Colors.grey[200]!
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.5,
+      );
+    }
+
+    // Draw axes and labels
+    for (int i = 0; i < numDomains; i++) {
+      final angle = angleSlice * i - 3.14159 / 2;
+      final x = center.dx + radius * cos(angle);
+      final y = center.dy + radius * sin(angle);
+
+      // Draw axis line
+      canvas.drawLine(center, Offset(x, y), Paint()..color = Colors.grey[300]!);
+
+      // Draw label
+      final labelOffset = Offset(
+        center.dx + (radius + 30) * cos(angle),
+        center.dy + (radius + 30) * sin(angle),
+      );
+      final textPainter = TextPainter(
+        text: TextSpan(text: domains[i].name, style: const TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.bold)),
+        textDirection: TextDirection.ltr,
+      );
+      textPainter.layout();
+      textPainter.paint(canvas, labelOffset - Offset(textPainter.width / 2, textPainter.height / 2));
+    }
+
+    // Draw the balance polygon
+    final pathPoints = <Offset>[];
+    for (int i = 0; i < numDomains; i++) {
+      final angle = angleSlice * i - 3.14159 / 2;
+      final value = values[i] / 100; // Normalize to 0-1
+      final r = radius * value;
+      final x = center.dx + r * cos(angle);
+      final y = center.dy + r * sin(angle);
+      pathPoints.add(Offset(x, y));
+    }
+
+    // Draw polygon
+    if (pathPoints.isNotEmpty) {
+      final path = Path();
+      path.moveTo(pathPoints[0].dx, pathPoints[0].dy);
+      for (int i = 1; i < pathPoints.length; i++) {
+        path.lineTo(pathPoints[i].dx, pathPoints[i].dy);
+      }
+      path.close();
+
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = Colors.green.withOpacity(0.3)
+          ..style = PaintingStyle.fill,
+      );
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = Colors.green
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+
+      // Draw points on polygon
+      for (final point in pathPoints) {
+        canvas.drawCircle(
+          point,
+          5,
+          Paint()
+            ..color = Colors.green
+            ..style = PaintingStyle.fill,
+        );
+      }
+    }
+
+    // Draw center balance dot
+    final avgValue = values.fold(0.0, (a, b) => a + b) / numDomains;
+    final balanceRadius = radius * (avgValue / 100);
+    canvas.drawCircle(
+      center,
+      8,
+      Paint()
+        ..color = Colors.amber
+        ..style = PaintingStyle.fill,
+    );
+    canvas.drawCircle(
+      center,
+      8,
+      Paint()
+        ..color = Colors.amber[700]!
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+
+    // Draw center circle (for reference)
+    canvas.drawCircle(center, 3, Paint()..color = Colors.grey[600]!);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
 
 class _MainNavigatorState extends State<MainNavigator> {
@@ -470,12 +623,25 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   late List<Domain> domains;
   late List<BalanceTask> tasks;
+  late List<bool> selectedTasks;
 
   @override
   void initState() {
     super.initState();
     domains = StorageService.getDomains();
     tasks = StorageService.getTasks();
+    selectedTasks = List<bool>.filled(tasks.length, false);
+    _checkIfShouldPromptCheckIn();
+  }
+
+  void _checkIfShouldPromptCheckIn() {
+    final timeSinceCheckIn = StorageService.getTimeSinceCheckIn();
+    // Prompt if more than 4 hours have passed
+    if (timeSinceCheckIn.inHours >= 4) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showCheckInDialog();
+      });
+    }
   }
 
   String _getTodayTheme() {
@@ -512,207 +678,197 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _toggleTask(int index) {
-    setState(() {
-      tasks[index].completed = !tasks[index].completed;
-      if (tasks[index].completed) {
-        for (var domainId in tasks[index].domainIds) {
-          final domain = domains.firstWhere((d) => d.id == domainId);
-          domain.value = (domain.value + tasks[index].impactValue).clamp(0, 100).toDouble();
-        }
-      } else {
-        for (var domainId in tasks[index].domainIds) {
-          final domain = domains.firstWhere((d) => d.id == domainId);
-          domain.value = (domain.value - tasks[index].impactValue).clamp(0, 100).toDouble();
-        }
-      }
-    });
-    StorageService.saveTasks(tasks);
-    StorageService.saveDomains(domains);
-  }
-
-  void _addTask() {
+  void _showCheckInDialog() {
+    final timeSinceCheckIn = StorageService.getTimeSinceCheckIn();
+    final hoursAgo = timeSinceCheckIn.inHours;
+    final minutesAgo = timeSinceCheckIn.inMinutes % 60;
+    
     showDialog(
       context: context,
-      builder: (context) => _AddTaskDialog(
-        domains: domains,
-        onAdd: (title, selectedDomainIds, impactValue) {
-          setState(() {
-            tasks.add(BalanceTask(
-              id: DateTime.now().millisecondsSinceEpoch.toString(),
-              title: title,
-              domainIds: selectedDomainIds,
-              impactValue: impactValue,
-            ));
-          });
-          StorageService.saveTasks(tasks);
-          Navigator.pop(context);
-        },
-      ),
-    );
-  }
-
-  void _resetDay() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Reset Day'),
-        content: const Text('This will uncheck all tasks and reset domain values to 50.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () {
-              setState(() {
-                for (var task in tasks) {
-                  task.completed = false;
-                }
-                for (var domain in domains) {
-                  domain.value = 50.0;
-                }
-              });
-              StorageService.saveTasks(tasks);
-              StorageService.saveDomains(domains);
-              Navigator.pop(context);
-            },
-            child: const Text('Reset'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Earthling Root')),
-      body: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Container(
-              padding: const EdgeInsets.all(12.0),
-              decoration: BoxDecoration(color: Colors.green[50], borderRadius: BorderRadius.circular(8.0)),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Today: ${_getTodayTheme()}', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+      barrierDismissible: false,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Check In'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'What have you done since your last check-in?',
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
+                ),
+                Text(
+                  'Last check-in: ${hoursAgo > 0 ? '$hoursAgo hr${hoursAgo > 1 ? 's' : ''} ' : ''}${minutesAgo} min ago',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
+                ),
+                const SizedBox(height: 12.0),
+                Text(
+                  'Select activities:',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+                ),
                 const SizedBox(height: 8.0),
-                Text(_getBalanceMessage(), style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.green[700])),
-              ]),
+                ...List.generate(tasks.length, (index) {
+                  final task = tasks[index];
+                  return CheckboxListTile(
+                    title: Text(task.title, style: const TextStyle(fontSize: 12)),
+                    subtitle: Text(
+                      task.benefitDomains.map((id) => domains.firstWhere((d) => d.id == id).name).join(', '),
+                      style: const TextStyle(fontSize: 10),
+                    ),
+                    value: selectedTasks[index],
+                    onChanged: (value) {
+                      setDialogState(() {
+                        selectedTasks[index] = value ?? false;
+                      });
+                    },
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                  );
+                }),
+              ],
             ),
-            const SizedBox(height: 20.0),
-            Text('Life Balance', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12.0),
-            ...domains.map((d) => _buildDomainBar(d)),
-            const SizedBox(height: 20.0),
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Text('Daily Tasks', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-              IconButton(icon: const Icon(Icons.add), onPressed: _addTask),
-            ]),
-            const SizedBox(height: 12.0),
-            if (tasks.isEmpty)
-              Padding(padding: const EdgeInsets.symmetric(vertical: 24.0), child: Center(child: Text('No tasks yet. Add one to get started!', style: TextStyle(color: Colors.grey[500]))))
-            else
-              ListView.builder(shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), itemCount: tasks.length, itemBuilder: (context, index) => _buildTaskTile(index, tasks[index])),
-            const SizedBox(height: 24.0),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _resetDay,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Reset Day'),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.red[400]),
-              ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _updateDomainsFromCheckIn();
+                StorageService.saveLastCheckIn(DateTime.now());
+              },
+              child: const Text('Skip (no progress)'),
             ),
-          ]),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _updateDomainsFromCheckIn();
+                StorageService.saveLastCheckIn(DateTime.now());
+              },
+              child: const Text('Complete Check-In'),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildDomainBar(Domain domain) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16.0),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [Icon(domain.icon, color: domain.color, size: 20), const SizedBox(width: 8.0), Text(domain.name, style: const TextStyle(fontWeight: FontWeight.w600)), const Spacer(), Text(domain.value.toStringAsFixed(0), style: TextStyle(fontWeight: FontWeight.bold, color: domain.color))]),
-        const SizedBox(height: 8.0),
-        ClipRRect(borderRadius: BorderRadius.circular(4.0), child: LinearProgressIndicator(value: domain.value / 100, minHeight: 12.0, backgroundColor: domain.color.withOpacity(0.1), valueColor: AlwaysStoppedAnimation<Color>(domain.color))),
-      ]),
-    );
-  }
-
-  Widget _buildTaskTile(int index, BalanceTask task) {
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 6.0),
-      child: CheckboxListTile(
-        title: Text(task.title),
-        subtitle: Text(task.domainIds.map((id) => domains.firstWhere((d) => d.id == id).name).join(', ')),
-        value: task.completed,
-        onChanged: (_) => _toggleTask(index),
-        secondary: Container(padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0), decoration: BoxDecoration(color: task.completed ? Colors.green[200] : Colors.grey[200], borderRadius: BorderRadius.circular(4.0)), child: Text(task.completed ? '✓' : '○')),
-      ),
-    );
-  }
-}
-
-class _AddTaskDialog extends StatefulWidget {
-  final List<Domain> domains;
-  final Function(String title, List<String> domainIds, int impact) onAdd;
-
-  const _AddTaskDialog({required this.domains, required this.onAdd});
-
-  @override
-  State<_AddTaskDialog> createState() => _AddTaskDialogState();
-}
-
-class _AddTaskDialogState extends State<_AddTaskDialog> {
-  late TextEditingController titleController;
-  late TextEditingController impactController;
-  List<String> selectedDomainIds = [];
-
-  @override
-  void initState() {
-    super.initState();
-    titleController = TextEditingController();
-    impactController = TextEditingController(text: '10');
-  }
-
-  @override
-  void dispose() {
-    titleController.dispose();
-    impactController.dispose();
-    super.dispose();
+  void _updateDomainsFromCheckIn() {
+    setState(() {
+      for (int i = 0; i < selectedTasks.length; i++) {
+        if (selectedTasks[i]) {
+          final task = tasks[i];
+          // Apply benefits
+          for (var domainId in task.benefitDomains) {
+            final domain = domains.firstWhere((d) => d.id == domainId);
+            domain.value = (domain.value + task.impactValue).clamp(0.0, 100.0);
+          }
+          // Apply trade-offs (reduce other domains)
+          for (var domainId in task.tradeoffDomains) {
+            final domain = domains.firstWhere((d) => d.id == domainId);
+            domain.value = (domain.value - (task.impactValue * 0.5)).clamp(0.0, 100.0);
+          }
+        }
+      }
+      selectedTasks = List<bool>.filled(tasks.length, false);
+    });
+    StorageService.saveDomains(domains);
   }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Add Task'),
-      content: SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          TextField(controller: titleController, decoration: const InputDecoration(labelText: 'Task Title', hintText: 'e.g., Water plants')),
-          const SizedBox(height: 12.0),
-          const Text('Affects:'),
-          const SizedBox(height: 8.0),
-          ...widget.domains.map((domain) => CheckboxListTile(title: Text(domain.name), value: selectedDomainIds.contains(domain.id), onChanged: (value) {
-                setState(() {
-                  if (value == true) {
-                    selectedDomainIds.add(domain.id);
-                  } else {
-                    selectedDomainIds.remove(domain.id);
-                  }
-                });
-              })),
-          const SizedBox(height: 8.0),
-          TextField(controller: impactController, decoration: const InputDecoration(labelText: 'Impact Value', hintText: '5-20'), keyboardType: TextInputType.number),
-        ]),
+    final values = domains.map((d) => d.value).toList();
+    
+    return Scaffold(
+      appBar: AppBar(title: const Text('Earthling Root v0.4')),
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Check-in button and time indicator
+              Center(
+                child: Column(
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _showCheckInDialog,
+                      icon: const Icon(Icons.assignment_turned_in),
+                      label: const Text('Check In Now'),
+                    ),
+                    const SizedBox(height: 8.0),
+                    Text(
+                      'Time since last check-in: ${StorageService.getTimeSinceCheckIn().inHours}h ${StorageService.getTimeSinceCheckIn().inMinutes % 60}m',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24.0),
+
+              // Today's theme and message
+              Container(
+                padding: const EdgeInsets.all(12.0),
+                decoration: BoxDecoration(color: Colors.green[50], borderRadius: BorderRadius.circular(8.0)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Today: ${_getTodayTheme()}', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8.0),
+                    Text(_getBalanceMessage(), style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.green[700])),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24.0),
+
+              // Radar Chart
+              Text('Life Balance Radar', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16.0),
+              Center(
+                child: SizedBox(
+                  width: 300,
+                  height: 300,
+                  child: CustomPaint(
+                    painter: RadarChartPainter(domains: domains, values: values),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24.0),
+
+              // Domain values as cards
+              Text('Domain Values', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12.0),
+              ...domains.map((d) => Padding(
+                padding: const EdgeInsets.only(bottom: 8.0),
+                child: Row(
+                  children: [
+                    Icon(d.icon, color: d.color, size: 24),
+                    const SizedBox(width: 12.0),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(d.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(4.0),
+                            child: LinearProgressIndicator(
+                              value: d.value / 100,
+                              minHeight: 8.0,
+                              backgroundColor: d.color.withOpacity(0.1),
+                              valueColor: AlwaysStoppedAnimation<Color>(d.color),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12.0),
+                    Text(d.value.toStringAsFixed(0), style: TextStyle(fontWeight: FontWeight.bold, color: d.color, fontSize: 14)),
+                  ],
+                ),
+              )),
+            ],
+          ),
+        ),
       ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-        ElevatedButton(onPressed: () {
-          if (titleController.text.isNotEmpty && selectedDomainIds.isNotEmpty && int.tryParse(impactController.text) != null) {
-            widget.onAdd(titleController.text, selectedDomainIds, int.parse(impactController.text));
-          }
-        }, child: const Text('Add')),
-      ],
     );
   }
 }
