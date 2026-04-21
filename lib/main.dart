@@ -18,6 +18,7 @@ class UserProfile {
   String biome; // temperate, tropical, desert, boreal, grassland, coastal, mountain
   String urbanStatus; // urban, suburban, rural
   String growingZone; // USDA hardiness zone (1-13)
+  String appTheme; // Theme selection: light, dark, land, mind, body, community, joy
   DateTime createdAt;
 
   UserProfile({
@@ -26,6 +27,7 @@ class UserProfile {
     this.biome = 'temperate',
     this.urbanStatus = 'suburban',
     this.growingZone = '5',
+    this.appTheme = 'light',
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -35,6 +37,7 @@ class UserProfile {
     'biome': biome,
     'urbanStatus': urbanStatus,
     'growingZone': growingZone,
+    'appTheme': appTheme,
     'createdAt': createdAt.toIso8601String(),
   };
 
@@ -44,6 +47,7 @@ class UserProfile {
     biome: json['biome'] ?? 'temperate',
     urbanStatus: json['urbanStatus'] ?? 'suburban',
     growingZone: json['growingZone'] ?? '5',
+    appTheme: json['appTheme'] ?? 'light',
     createdAt: json['createdAt'] != null ? DateTime.parse(json['createdAt']) : null,
   );
 }
@@ -566,11 +570,13 @@ class EarthlingRootApp extends StatefulWidget {
 
 class _EarthlingRootAppState extends State<EarthlingRootApp> {
   late List<Domain> domains;
+  late UserProfile profile;
 
   @override
   void initState() {
     super.initState();
     domains = StorageService.getDomains();
+    profile = StorageService.getUserProfile();
   }
 
   Color _getPrimaryColor() {
@@ -578,27 +584,114 @@ class _EarthlingRootAppState extends State<EarthlingRootApp> {
     return landDomain.color;
   }
 
+  ThemeData _buildThemeData() {
+    final baseTheme = ThemeData(
+      primaryColor: _getPrimaryColor(),
+      useMaterial3: true,
+    );
+
+    final Color primaryColor;
+    final Color backgroundColor;
+    final Brightness brightness;
+
+    switch (profile.appTheme) {
+      case 'dark':
+        primaryColor = const Color(0xFF2196F3);
+        backgroundColor = Colors.grey[900]!;
+        brightness = Brightness.dark;
+        break;
+      case 'land':
+        primaryColor = const Color(0xFF4CAF50);
+        backgroundColor = const Color(0xFFF1F8E9);
+        brightness = Brightness.light;
+        break;
+      case 'mind':
+        primaryColor = const Color(0xFF2196F3);
+        backgroundColor = const Color(0xFFE3F2FD);
+        brightness = Brightness.light;
+        break;
+      case 'body':
+        primaryColor = const Color(0xFFFF5722);
+        backgroundColor = const Color(0xFFFFEBEE);
+        brightness = Brightness.light;
+        break;
+      case 'community':
+        primaryColor = const Color(0xFF9C27B0);
+        backgroundColor = const Color(0xFFF3E5F5);
+        brightness = Brightness.light;
+        break;
+      case 'joy':
+        primaryColor = const Color(0xFFFFC107);
+        backgroundColor = const Color(0xFFFFFDE7);
+        brightness = Brightness.light;
+        break;
+      case 'light':
+      default:
+        primaryColor = _getPrimaryColor();
+        backgroundColor = Colors.white;
+        brightness = Brightness.light;
+    }
+
+    if (profile.appTheme == 'dark') {
+      return ThemeData.dark(useMaterial3: true).copyWith(
+        primaryColor: primaryColor,
+        scaffoldBackgroundColor: backgroundColor,
+        appBarTheme: AppBarTheme(
+          backgroundColor: Colors.grey[800],
+          elevation: 0,
+        ),
+      );
+    } else {
+      return ThemeData(
+        useMaterial3: true,
+        brightness: brightness,
+        primaryColor: primaryColor,
+        scaffoldBackgroundColor: backgroundColor,
+        appBarTheme: AppBarTheme(
+          backgroundColor: Colors.white,
+          foregroundColor: Colors.black87,
+          elevation: 0,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: primaryColor,
+            foregroundColor: Colors.white,
+          ),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Earthling Root v0.5',
-      theme: ThemeData(
-        primaryColor: _getPrimaryColor(),
-        useMaterial3: true,
+      theme: _buildThemeData(),
+      home: MainNavigator(
+        onDomainsChanged: () {
+          setState(() {
+            domains = StorageService.getDomains();
+          });
+        },
+        onThemeChanged: () {
+          setState(() {
+            profile = StorageService.getUserProfile();
+          });
+        },
       ),
-      home: MainNavigator(onDomainsChanged: () {
-        setState(() {
-          domains = StorageService.getDomains();
-        });
-      }),
     );
   }
 }
 
 class MainNavigator extends StatefulWidget {
   final VoidCallback? onDomainsChanged;
+  final VoidCallback? onThemeChanged;
   
-  const MainNavigator({super.key, this.onDomainsChanged});
+  const MainNavigator({
+    super.key,
+    this.onDomainsChanged,
+    this.onThemeChanged,
+  });
 
   @override
   State<MainNavigator> createState() => _MainNavigatorState();
@@ -737,10 +830,13 @@ class _MainNavigatorState extends State<MainNavigator> {
     _screens = [
       const HomeScreen(),
       const GoalsScreen(),
-      SettingsScreen(onSettingsChanged: () {
-        widget.onDomainsChanged?.call();
-        setState(() {});
-      }),
+      SettingsScreen(
+        onSettingsChanged: () {
+          widget.onDomainsChanged?.call();
+          widget.onThemeChanged?.call();
+          setState(() {});
+        },
+      ),
     ];
   }
 
@@ -1070,6 +1166,40 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Feedback Message (TOP - CENTERED)
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.all(12.0),
+                  decoration: BoxDecoration(
+                    color: Colors.green[50],
+                    borderRadius: BorderRadius.circular(8.0),
+                    border: Border.all(color: Colors.green[200]!, width: 1),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Text(
+                        '${_getDayName()} - ${_getWeeklyTheme()}',
+                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: Colors.green[700],
+                        ),
+                      ),
+                      const SizedBox(height: 6.0),
+                      Text(
+                        _getSimpleFeedback(),
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Colors.green[800],
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20.0),
+
               // Radar Chart (PRIMARY)
               Center(
                 child: Column(
@@ -1122,37 +1252,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               )),
-              const SizedBox(height: 20.0),
-
-              // Feedback Message
-              Container(
-                padding: const EdgeInsets.all(12.0),
-                decoration: BoxDecoration(
-                  color: Colors.green[50],
-                  borderRadius: BorderRadius.circular(8.0),
-                  border: Border.all(color: Colors.green[200]!, width: 1),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${_getDayName()} - ${_getWeeklyTheme()}',
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                        color: Colors.green[700],
-                      ),
-                    ),
-                    const SizedBox(height: 6.0),
-                    Text(
-                      _getSimpleFeedback(),
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Colors.green[800],
-                        height: 1.4,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
               const SizedBox(height: 20.0),
 
               // Check-in Button
@@ -1430,6 +1529,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildThemeSelector() {
+    final themes = {
+      'light': {'label': '☀️ Light', 'color': Colors.white},
+      'dark': {'label': '🌙 Dark', 'color': Colors.grey[900]},
+      'land': {'label': '🌱 Land', 'color': const Color(0xFF4CAF50)},
+      'mind': {'label': '💡 Mind', 'color': const Color(0xFF2196F3)},
+      'body': {'label': '❤️ Body', 'color': const Color(0xFFFF5722)},
+      'community': {'label': '👥 Community', 'color': const Color(0xFF9C27B0)},
+      'joy': {'label': '⭐ Joy', 'color': const Color(0xFFFFC107)},
+    };
+
+    return Column(
+      children: themes.entries.map((entry) {
+        final themeId = entry.key;
+        final themeData = entry.value;
+        final isSelected = profile.appTheme == themeId;
+
+        return Card(
+          margin: const EdgeInsets.only(bottom: 8.0),
+          elevation: isSelected ? 4 : 0,
+          color: isSelected ? Colors.blue[50] : Colors.white,
+          child: ListTile(
+            leading: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: themeData['color'] as Color,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: isSelected ? Colors.blue : Colors.transparent,
+                  width: 3,
+                ),
+              ),
+            ),
+            title: Text(
+              themeData['label'] as String,
+              style: TextStyle(
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                color: isSelected ? Colors.blue : Colors.black,
+              ),
+            ),
+            trailing: isSelected ? const Icon(Icons.check_circle, color: Colors.blue) : null,
+            onTap: () {
+              setState(() {
+                profile.appTheme = themeId;
+              });
+              StorageService.saveUserProfile(profile);
+              widget.onSettingsChanged?.call();
+            },
+          ),
+        );
+      }).toList(),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1546,28 +1700,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               const SizedBox(height: 32.0),
               
-              // Domain Customization
-              Text('Domain Colors', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+              // App Theme Selection
+              Text('App Theme', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
               const SizedBox(height: 16.0),
-              ...domains.map((domain) => ListTile(
-                leading: Icon(domain.icon, color: domain.color, size: 28),
-                title: Text(domain.name),
-                trailing: Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: domain.color,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      onTap: () => _showColorPicker(domain),
-                      customBorder: const CircleBorder(),
-                    ),
-                  ),
-                ),
-              )),
+              _buildThemeSelector(),
               const SizedBox(height: 32.0),
               
               // About Section
