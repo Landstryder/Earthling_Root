@@ -2,23 +2,133 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'dart:math';
+import 'goals_factory.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await StorageService.init();
-  await StorageService.initializeDefaultsIfNeeded();
+  // Don't initialize defaults here - let SetupScreen handle it
   runApp(const EarthlingRootApp());
 }
 
-// Models, storage, and UI implemented for v0.2
+// ============================================================================
+// GOAL MODEL - UNIFIED SYSTEM
+// ============================================================================
+class Goal {
+  final String id;
+  final String title;
+  final String? description;
+  final List<String> domains;
+  final Map<String, int> domainImpacts; // Map of domain -> impact value (can be +/-)
+  final double cooldownDurationHours;
+  DateTime? lastCompletedTime;
+  final bool isRepeatable;
+  int currentProgress;
+  final int? targetProgress;
+  bool completed;
+  final DateTime createdAt;
 
+  Goal({
+    required this.id,
+    required this.title,
+    this.description,
+    required this.domains,
+    required this.domainImpacts,
+    required this.cooldownDurationHours,
+    this.lastCompletedTime,
+    this.isRepeatable = true,
+    this.currentProgress = 0,
+    this.targetProgress,
+    this.completed = false,
+    DateTime? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now();
+
+  /// Check if goal is available now (not on cooldown)
+  bool isAvailable() {
+    if (lastCompletedTime == null) return true;
+    final hoursSinceCompletion = DateTime.now().difference(lastCompletedTime!).inHours;
+    return hoursSinceCompletion >= cooldownDurationHours;
+  }
+
+  /// Get hours remaining on cooldown
+  double getHoursUntilAvailable() {
+    if (lastCompletedTime == null) return 0;
+    final hoursSinceCompletion = DateTime.now().difference(lastCompletedTime!).inHours.toDouble();
+    return max(0, cooldownDurationHours - hoursSinceCompletion);
+  }
+
+  /// Get cooldown status for display
+  String getCooldownStatus() {
+    if (isAvailable()) return 'Ready';
+    final hoursRemaining = getHoursUntilAvailable();
+    if (hoursRemaining > 24) {
+      final days = (hoursRemaining / 24).ceil();
+      return 'Available in $days day${days > 1 ? 's' : ''}';
+    }
+    return 'Available in ${hoursRemaining.ceil()}h';
+  }
+
+  /// Get total impact across all domains (for display)
+  int getTotalImpact() {
+    return domainImpacts.values.fold(0, (sum, value) => sum + value);
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'title': title,
+    'description': description,
+    'domains': domains,
+    'domainImpacts': domainImpacts,
+    'cooldownDurationHours': cooldownDurationHours,
+    'lastCompletedTime': lastCompletedTime?.toIso8601String(),
+    'isRepeatable': isRepeatable,
+    'currentProgress': currentProgress,
+    'targetProgress': targetProgress,
+    'completed': completed,
+    'createdAt': createdAt.toIso8601String(),
+  };
+
+  factory Goal.fromJson(Map<String, dynamic> json) {
+    // Handle backward compatibility: if domainImpacts doesn't exist, use impactValue
+    Map<String, int> impacts = {};
+    if (json['domainImpacts'] != null) {
+      impacts = Map<String, int>.from(json['domainImpacts']);
+    } else if (json['impactValue'] != null) {
+      // Legacy format: distribute same impact to all domains
+      final legacyValue = json['impactValue'] as int;
+      for (final domain in (json['domains'] as List).cast<String>()) {
+        impacts[domain] = legacyValue;
+      }
+    }
+    
+    return Goal(
+      id: json['id'],
+      title: json['title'],
+      description: json['description'],
+      domains: List<String>.from(json['domains'] ?? []),
+      domainImpacts: impacts,
+      cooldownDurationHours: (json['cooldownDurationHours'] as num).toDouble(),
+      lastCompletedTime: json['lastCompletedTime'] != null ? DateTime.parse(json['lastCompletedTime']) : null,
+      isRepeatable: json['isRepeatable'] ?? true,
+      currentProgress: json['currentProgress'] ?? 0,
+      targetProgress: json['targetProgress'],
+      completed: json['completed'] ?? false,
+      createdAt: json['createdAt'] != null ? DateTime.parse(json['createdAt']) : DateTime.now(),
+    );
+  }
+}
+
+// ============================================================================
+// USER PROFILE MODEL
+// ============================================================================
 class UserProfile {
   String name;
   double acreage;
-  String biome; // temperate, tropical, desert, boreal, grassland, coastal, mountain
-  String urbanStatus; // urban, suburban, rural
-  String growingZone; // USDA hardiness zone (1-13)
-  String appTheme; // Theme selection: light, dark, land, mind, body, community, joy
+  String biome;
+  String urbanStatus;
+  String growingZone;
+  String appTheme;
+  bool initialized; // Flag for first-launch setup completion
   DateTime createdAt;
 
   UserProfile({
@@ -28,6 +138,7 @@ class UserProfile {
     this.urbanStatus = 'suburban',
     this.growingZone = '5',
     this.appTheme = 'light',
+    this.initialized = false,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -38,6 +149,7 @@ class UserProfile {
     'urbanStatus': urbanStatus,
     'growingZone': growingZone,
     'appTheme': appTheme,
+    'initialized': initialized,
     'createdAt': createdAt.toIso8601String(),
   };
 
@@ -48,154 +160,116 @@ class UserProfile {
     urbanStatus: json['urbanStatus'] ?? 'suburban',
     growingZone: json['growingZone'] ?? '5',
     appTheme: json['appTheme'] ?? 'light',
+    initialized: json['initialized'] ?? false,
     createdAt: json['createdAt'] != null ? DateTime.parse(json['createdAt']) : null,
   );
 }
 
-// Default tasks for earthling way followers (with trade-off mechanics)
-List<BalanceTask> _getDefaultTasks() {
-  return [
-    // Daily tasks - benefits listed first, then trade-offs
-    BalanceTask(
-      id: 'daily_1',
-      title: 'Water plants & garden',
-      benefitDomains: ['land'],
-      tradeoffDomains: ['body', 'joy'], // Time spent instead of physical/fun activity
-      impactValue: 12,
-      weeklyTheme: 'Water', // Wednesday
-    ),
-    BalanceTask(
-      id: 'daily_2',
-      title: 'Move your body (walk, stretch, yoga)',
-      benefitDomains: ['body'],
-      tradeoffDomains: ['mind', 'community'], // Time away from learning/social
-      impactValue: 12,
-      weeklyTheme: 'Growth', // Monday
-    ),
-    BalanceTask(
-      id: 'daily_3',
-      title: 'Eat locally/seasonally',
-      benefitDomains: ['body', 'land'],
-      tradeoffDomains: ['community'], // Less convenience, harder social eating
-      impactValue: 10,
-      weeklyTheme: 'Growth',
-    ),
-    BalanceTask(
-      id: 'daily_4',
-      title: 'Meditate or reflect',
-      benefitDomains: ['mind', 'joy'],
-      tradeoffDomains: ['community', 'body'], // Solitude vs. movement/connection
-      impactValue: 10,
-      weeklyTheme: 'Rest',
-    ),
-    BalanceTask(
-      id: 'daily_5',
-      title: 'Spend time in nature',
-      benefitDomains: ['land', 'body', 'joy'],
-      tradeoffDomains: ['mind', 'community'], // Less productivity/social time
-      impactValue: 15,
-      weeklyTheme: 'Growth',
-    ),
-    BalanceTask(
-      id: 'daily_6',
-      title: 'Connect with community',
-      benefitDomains: ['community', 'joy'],
-      tradeoffDomains: ['land', 'mind'], // Less personal projects/learning time
-      impactValue: 12,
-      weeklyTheme: 'Community',
-    ),
-    // Weekly tasks
-    BalanceTask(
-      id: 'weekly_1',
-      title: 'Composting & waste reduction',
-      benefitDomains: ['land'],
-      tradeoffDomains: ['joy', 'community'], // Extra effort vs. fun activities
-      impactValue: 8,
-      weeklyTheme: 'Repair',
-    ),
-    BalanceTask(
-      id: 'weekly_2',
-      title: 'Study sustainable practices',
-      benefitDomains: ['mind', 'land'],
-      tradeoffDomains: ['body', 'joy'], // Sedentary/serious vs. movement/fun
-      impactValue: 10,
-      weeklyTheme: 'Experiment',
-    ),
-    BalanceTask(
-      id: 'weekly_3',
-      title: 'Community service or gathering',
-      benefitDomains: ['community', 'land'],
-      tradeoffDomains: ['body', 'joy'], // Less personal time/fun
-      impactValue: 12,
-      weeklyTheme: 'Community',
-    ),
-    BalanceTask(
-      id: 'weekly_4',
-      title: 'Deep work on a project',
-      benefitDomains: ['mind', 'joy'],
-      tradeoffDomains: ['body', 'community'],
-      impactValue: 14,
-      weeklyTheme: 'Deep Work',
-    ),
-  ];
-}
-
-// Default goals for Earthling way followers
+/// Generate default goals for new users from goals_factory
+/// These are fully editable and deletable
 List<Goal> _getDefaultGoals() {
-  return [
-    // Finite goals
-    Goal(
-      id: 'goal_garden_bed',
-      title: 'Build first garden bed',
-      isInfinite: false,
-      targetProgress: 1,
-    ),
-    Goal(
-      id: 'goal_water_system',
-      title: 'Set up water system',
-      isInfinite: false,
-      targetProgress: 1,
-    ),
-    Goal(
-      id: 'goal_first_crop',
-      title: 'Plant and harvest first crop',
-      isInfinite: false,
-      targetProgress: 1,
-    ),
-    Goal(
-      id: 'goal_compost',
-      title: 'Establish compost system',
-      isInfinite: false,
-      targetProgress: 1,
-    ),
-    // Infinite goals
-    Goal(
-      id: 'goal_days_active',
-      title: 'Days checked in',
-      isInfinite: true,
-      currentProgress: 0,
-    ),
-    Goal(
-      id: 'goal_total_checkins',
-      title: 'Total check-ins',
-      isInfinite: true,
-      currentProgress: 0,
-    ),
-    Goal(
-      id: 'goal_land_hours',
-      title: 'Hours in Land domain',
-      isInfinite: true,
-      currentProgress: 0,
-    ),
-    Goal(
-      id: 'goal_tasks_completed',
-      title: 'Tasks completed',
-      isInfinite: true,
-      currentProgress: 0,
-    ),
-  ];
+  final goalDataList = getDefaultGoalsData();
+  return goalDataList.map((data) {
+    return Goal(
+      id: data['id'],
+      title: data['title'],
+      description: data['description'],
+      domains: List<String>.from(data['domains']),
+      domainImpacts: Map<String, int>.from(data['domainImpacts']),
+      cooldownDurationHours: data['cooldown'],
+      isRepeatable: true,
+    );
+  }).toList();
 }
 
+/// Add context-aware goals based on user settings
+List<Goal> _getContextAwareGoals(UserProfile profile) {
+  final contextGoals = <Goal>[];
+  
+  // Desert climate adaptations
+  if (profile.biome == 'desert') {
+    contextGoals.addAll([
+      Goal(
+        id: 'goal_water_retention',
+        title: 'Check water systems',
+        description: 'Inspect irrigation, drip lines, and mulch coverage to minimize evaporation.',
+        domains: ['land', 'mind'],
+        domainImpacts: {'land': 5, 'mind': 2},
+        cooldownDurationHours: 168,
+        isRepeatable: true,
+      ),
+      Goal(
+        id: 'goal_shade',
+        title: 'Provide shade protection',
+        description: 'Shade cloth or plant companions for vulnerable crops in extreme heat.',
+        domains: ['land'],
+        domainImpacts: {'land': 4},
+        cooldownDurationHours: 168,
+        isRepeatable: true,
+      ),
+    ]);
+  }
+  
+  // Cold climate adaptations
+  if (profile.growingZone.contains(RegExp(r'[1-4]'))) {
+    contextGoals.addAll([
+      Goal(
+        id: 'goal_frost_protect',
+        title: 'Prepare frost protection',
+        description: 'Gather row covers, cold frames, or cloches for tender plants.',
+        domains: ['land', 'mind'],
+        domainImpacts: {'land': 4, 'mind': 2},
+        cooldownDurationHours: 168,
+        isRepeatable: true,
+      ),
+      Goal(
+        id: 'goal_storage',
+        title: 'Check stored food',
+        description: 'Inspect preserved foods, stored vegetables, and emergency supplies.',
+        domains: ['body', 'mind'],
+        domainImpacts: {'body': 1, 'mind': 3},
+        cooldownDurationHours: 168,
+        isRepeatable: true,
+      ),
+    ]);
+  }
+  
+  // Large acreage
+  if (profile.acreage > 2) {
+    contextGoals.add(
+      Goal(
+        id: 'goal_perimeter',
+        title: 'Walk perimeter',
+        description: 'Check fencing, gates, and boundaries. Look for damage or intrusions.',
+        domains: ['land', 'body'],
+        domainImpacts: {'land': 3, 'body': 2},
+        cooldownDurationHours: 168,
+        isRepeatable: true,
+      ),
+    );
+  }
+  
+  // Rural context
+  if (profile.urbanStatus == 'rural') {
+    contextGoals.add(
+      Goal(
+        id: 'goal_neighbor_check',
+        title: 'Connect with neighbors',
+        description: 'Check in with nearby properties. Share knowledge or resources.',
+        domains: ['community', 'joy'],
+        domainImpacts: {'community': 2, 'joy': 2},
+        cooldownDurationHours: 168,
+        isRepeatable: true,
+      ),
+    );
+  }
+  
+  return contextGoals;
+}
+
+// ============================================================================
+// DOMAIN MODEL
+// ============================================================================
 class Domain {
   final String id;
   final String name;
@@ -273,113 +347,9 @@ List<Domain> _getDomainDefinitions() {
   ];
 }
 
-class BalanceTask {
-  final String id;
-  final String title;
-  final List<String> benefitDomains; // Domains that improve
-  final List<String> tradeoffDomains; // Domains that decrease (trade-off)
-  final int impactValue;
-  bool completed;
-  DateTime? completedAt; // Track when task was completed (for decay)
-  final DateTime createdAt;
-  final String? weeklyTheme; // Optional: Monday→Growth, Tuesday→Repair, etc.
-
-  BalanceTask({
-    required this.id,
-    required this.title,
-    required this.benefitDomains,
-    required this.tradeoffDomains,
-    required this.impactValue,
-    this.completed = false,
-    this.completedAt,
-    DateTime? createdAt,
-    this.weeklyTheme,
-  }) : createdAt = createdAt ?? DateTime.now();
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'benefitDomains': benefitDomains,
-        'tradeoffDomains': tradeoffDomains,
-        'impactValue': impactValue,
-        'completed': completed,
-        'completedAt': completedAt?.toIso8601String(),
-        'createdAt': createdAt.toIso8601String(),
-        'weeklyTheme': weeklyTheme,
-      };
-
-  factory BalanceTask.fromJson(Map<String, dynamic> json) => BalanceTask(
-        id: json['id'],
-        title: json['title'],
-        benefitDomains: List<String>.from(json['benefitDomains'] ?? json['domainIds'] ?? []),
-        tradeoffDomains: List<String>.from(json['tradeoffDomains'] ?? []),
-        impactValue: json['impactValue'],
-        completed: json['completed'] ?? false,
-        completedAt: json['completedAt'] != null ? DateTime.parse(json['completedAt']) : null,
-        createdAt: json['createdAt'] != null ? DateTime.parse(json['createdAt']) : DateTime.now(),
-        weeklyTheme: json['weeklyTheme'],
-      );
-
-  /// Calculate impact multiplier based on time since completion (0.0 to 1.0)
-  /// Full value at completion, 50% after 24hrs, 0% after 72hrs (Sisyphus pattern)
-  double getImpactMultiplier() {
-    if (!completed || completedAt == null) return 0.0;
-    final hoursSinceCompletion = DateTime.now().difference(completedAt!).inHours;
-    if (hoursSinceCompletion < 24) return 1.0;
-    if (hoursSinceCompletion < 72) {
-      // Linear decay from 1.0 to 0.0 over 48 hours (24-72)
-      return max(0.0, 1.0 - ((hoursSinceCompletion - 24) / 48));
-    }
-    return 0.0;
-  }
-}
-
-class Goal {
-  final String id;
-  final String title;
-  final bool isInfinite;
-  int currentProgress;
-  final int? targetProgress;
-  bool completed;
-  final DateTime createdAt;
-
-  Goal({
-    required this.id,
-    required this.title,
-    required this.isInfinite,
-    this.currentProgress = 0,
-    this.targetProgress,
-    this.completed = false,
-    DateTime? createdAt,
-  }) : createdAt = createdAt ?? DateTime.now();
-
-  double getPercentage() {
-    if (isInfinite || targetProgress == null) return 0;
-    if (targetProgress == 0) return 0;
-    return (currentProgress / targetProgress!) * 100;
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'isInfinite': isInfinite,
-        'currentProgress': currentProgress,
-        'targetProgress': targetProgress,
-        'completed': completed,
-        'createdAt': createdAt.toIso8601String(),
-      };
-
-  factory Goal.fromJson(Map<String, dynamic> json) => Goal(
-        id: json['id'],
-        title: json['title'],
-        isInfinite: json['isInfinite'],
-        currentProgress: json['currentProgress'] ?? 0,
-        targetProgress: json['targetProgress'],
-        completed: json['completed'] ?? false,
-        createdAt: DateTime.parse(json['createdAt']),
-      );
-}
-
+// ============================================================================
+// STORAGE SERVICE
+// ============================================================================
 class StorageService {
   static SharedPreferences? _prefs;
 
@@ -390,28 +360,21 @@ class StorageService {
   static Future<void> initializeDefaultsIfNeeded() async {
     final hasProfile = _prefs?.getString('userProfile') != null;
     if (!hasProfile) {
-      // First time user - save default profile
-      final defaultProfile = UserProfile(name: 'Earthling');
+      // First time user - create uninitialized profile
+      final defaultProfile = UserProfile(name: 'Earthling', initialized: false);
       await saveUserProfile(defaultProfile);
-      
-      // Add default tasks
-      final defaultTasks = _getDefaultTasks();
-      await saveTasks(defaultTasks);
-
-      // Add default goals
-      final defaultGoals = _getDefaultGoals();
-      await saveGoals(defaultGoals);
-
-      // Initialize timestamps
-      await saveLastCheckIn(DateTime.now());
       await saveLastScoreDecay(DateTime.now());
-    } else {
-      // Existing user - ensure goals exist
-      final goals = getGoals();
-      if (goals.isEmpty) {
-        final defaultGoals = _getDefaultGoals();
-        await saveGoals(defaultGoals);
-      }
+    }
+  }
+  
+  /// Load default goals based on user profile
+  static Future<void> loadDefaultGoalsForProfile(UserProfile profile) async {
+    final goals = getGoals();
+    if (goals.isEmpty) {
+      final defaultGoals = _getDefaultGoals();
+      final contextGoals = _getContextAwareGoals(profile);
+      final allGoals = [...defaultGoals, ...contextGoals];
+      await saveGoals(allGoals);
     }
   }
 
@@ -469,22 +432,6 @@ class StorageService {
         .toList();
   }
 
-  static Future<void> saveTasks(List<BalanceTask> tasks) async {
-    if (_prefs == null) return;
-    final json = tasks.map((t) => t.toJson()).toList();
-    await _prefs!.setString('tasks', jsonEncode(json));
-  }
-
-  static List<BalanceTask> getTasks() {
-    if (_prefs == null) return [];
-    final json = _prefs!.getString('tasks');
-    if (json == null) return [];
-    final List<dynamic> data = jsonDecode(json);
-    return data
-        .map((t) => BalanceTask.fromJson(t as Map<String, dynamic>))
-        .toList();
-  }
-
   static Future<void> saveGoals(List<Goal> goals) async {
     if (_prefs == null) return;
     final json = goals.map((g) => g.toJson()).toList();
@@ -497,38 +444,6 @@ class StorageService {
     if (json == null) return [];
     final List<dynamic> data = jsonDecode(json);
     return data.map((g) => Goal.fromJson(g as Map<String, dynamic>)).toList();
-  }
-
-  static Future<void> clearAll() async {
-    if (_prefs == null) return;
-    await _prefs!.clear();
-  }
-
-  // Check-in tracking
-  static Future<void> saveLastCheckIn(DateTime time) async {
-    if (_prefs == null) return;
-    await _prefs!.setString('lastCheckIn', time.toIso8601String());
-  }
-
-  static DateTime getLastCheckIn() {
-    if (_prefs == null) return DateTime.now().subtract(const Duration(hours: 24));
-    final json = _prefs!.getString('lastCheckIn');
-    if (json == null) return DateTime.now().subtract(const Duration(hours: 24));
-    return DateTime.parse(json);
-  }
-
-  static Duration getTimeSinceCheckIn() {
-    return DateTime.now().difference(getLastCheckIn());
-  }
-
-  static bool canCheckIn() {
-    return getTimeSinceCheckIn().inMinutes >= 15;
-  }
-
-  static int getMinutesUntilNextCheckIn() {
-    final minElapsed = getTimeSinceCheckIn().inMinutes;
-    if (minElapsed >= 15) return 0;
-    return 15 - minElapsed;
   }
 
   // Score decay tracking
@@ -571,12 +486,26 @@ class EarthlingRootApp extends StatefulWidget {
 class _EarthlingRootAppState extends State<EarthlingRootApp> {
   late List<Domain> domains;
   late UserProfile profile;
+  bool _initialized = false;
 
   @override
   void initState() {
     super.initState();
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    // First ensure defaults are set up
+    await StorageService.initializeDefaultsIfNeeded();
+    
     domains = StorageService.getDomains();
     profile = StorageService.getUserProfile();
+    
+    if (mounted) {
+      setState(() {
+        _initialized = true;
+      });
+    }
   }
 
   Color _getPrimaryColor() {
@@ -647,7 +576,7 @@ class _EarthlingRootAppState extends State<EarthlingRootApp> {
         brightness: brightness,
         primaryColor: primaryColor,
         scaffoldBackgroundColor: backgroundColor,
-        appBarTheme: AppBarTheme(
+        appBarTheme: const AppBarTheme(
           backgroundColor: Colors.white,
           foregroundColor: Colors.black87,
           elevation: 0,
@@ -664,6 +593,37 @@ class _EarthlingRootAppState extends State<EarthlingRootApp> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_initialized) {
+      return const MaterialApp(
+        home: Scaffold(
+          body: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+
+    // Show settings gate if not initialized
+    if (!profile.initialized) {
+      return MaterialApp(
+        title: 'Earthling Root v0.5',
+        theme: _buildThemeData(),
+        home: SettingsGateScreen(
+          profile: profile,
+          onConfirm: (updatedProfile) async {
+            profile = updatedProfile;
+            profile.initialized = true;
+            await StorageService.saveUserProfile(profile);
+            
+            // Load default goals based on profile
+            await StorageService.loadDefaultGoalsForProfile(profile);
+            
+            if (mounted) {
+              setState(() {});
+            }
+          },
+        ),
+      );
+    }
+
     return MaterialApp(
       title: 'Earthling Root v0.5',
       theme: _buildThemeData(),
@@ -861,6 +821,261 @@ class _MainNavigatorState extends State<MainNavigator> {
   }
 }
 
+// ============================================================================
+// SETTINGS GATE SCREEN - First-time setup
+// ============================================================================
+class SettingsGateScreen extends StatefulWidget {
+  final UserProfile profile;
+  final Function(UserProfile) onConfirm;
+  
+  const SettingsGateScreen({
+    super.key,
+    required this.profile,
+    required this.onConfirm,
+  });
+
+  @override
+  State<SettingsGateScreen> createState() => _SettingsGateScreenState();
+}
+
+class _SettingsGateScreenState extends State<SettingsGateScreen> {
+  late TextEditingController nameController;
+  late TextEditingController acreageController;
+  late String selectedBiome;
+  late String selectedUrbanStatus;
+  late String selectedGrowingZone;
+
+  @override
+  void initState() {
+    super.initState();
+    nameController = TextEditingController(text: widget.profile.name);
+    acreageController = TextEditingController(text: widget.profile.acreage.toStringAsFixed(1));
+    selectedBiome = widget.profile.biome;
+    selectedUrbanStatus = widget.profile.urbanStatus;
+    selectedGrowingZone = widget.profile.growingZone;
+  }
+
+  @override
+  void dispose() {
+    nameController.dispose();
+    acreageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Welcome to Earthling Root'),
+        elevation: 0,
+        centerTitle: true,
+        automaticallyImplyLeading: false,
+      ),
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Text(
+                  'Let\'s get to know your situation',
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+                ),
+              ),
+              const SizedBox(height: 8.0),
+              Center(
+                child: Text(
+                  'These settings help us suggest relevant goals for your unique context.',
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey[600]),
+                ),
+              ),
+              const SizedBox(height: 28.0),
+
+              // Name
+              Text('Your Name', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8.0),
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  hintText: 'Your name',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 20.0),
+
+              // Biome
+              Text('Climate / Biome', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8.0),
+              DropdownButtonFormField<String>(
+                value: selectedBiome,
+                items: const [
+                  DropdownMenuItem(value: 'temperate', child: Text('Temperate')),
+                  DropdownMenuItem(value: 'tropical', child: Text('Tropical')),
+                  DropdownMenuItem(value: 'desert', child: Text('Desert')),
+                  DropdownMenuItem(value: 'boreal', child: Text('Boreal')),
+                  DropdownMenuItem(value: 'grassland', child: Text('Grassland')),
+                  DropdownMenuItem(value: 'coastal', child: Text('Coastal')),
+                  DropdownMenuItem(value: 'mountain', child: Text('Mountain')),
+                ],
+                onChanged: (value) {
+                  setState(() {
+                    selectedBiome = value ?? 'temperate';
+                  });
+                },
+                decoration: const InputDecoration(border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 20.0),
+
+              // Urban Status
+              Text('Urban Status', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8.0),
+              DropdownButtonFormField<String>(
+                value: selectedUrbanStatus,
+                items: const [
+                  DropdownMenuItem(value: 'urban', child: Text('Urban')),
+                  DropdownMenuItem(value: 'suburban', child: Text('Suburban')),
+                  DropdownMenuItem(value: 'rural', child: Text('Rural')),
+                ],
+                onChanged: (value) {
+                  setState(() {
+                    selectedUrbanStatus = value ?? 'suburban';
+                  });
+                },
+                decoration: const InputDecoration(border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 20.0),
+
+              // Growing Zone
+              Text('Growing Zone (USDA)', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8.0),
+              DropdownButtonFormField<String>(
+                value: selectedGrowingZone,
+                items: const [
+                  DropdownMenuItem(value: '1', child: Text('Zone 1')),
+                  DropdownMenuItem(value: '5', child: Text('Zone 5')),
+                  DropdownMenuItem(value: '10', child: Text('Zone 10')),
+                  DropdownMenuItem(value: '13', child: Text('Zone 13')),
+                ],
+                onChanged: (value) {
+                  setState(() {
+                    selectedGrowingZone = value ?? '5';
+                  });
+                },
+                decoration: const InputDecoration(border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 20.0),
+
+              // Acreage
+              Text('Acreage (optional)', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8.0),
+              TextField(
+                controller: acreageController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  hintText: '0.0',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 32.0),
+
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    final updatedProfile = UserProfile(
+                      name: nameController.text.isNotEmpty ? nameController.text : 'Earthling',
+                      acreage: double.tryParse(acreageController.text) ?? 0.0,
+                      biome: selectedBiome,
+                      urbanStatus: selectedUrbanStatus,
+                      growingZone: selectedGrowingZone,
+                      appTheme: widget.profile.appTheme,
+                      initialized: false,
+                      createdAt: widget.profile.createdAt,
+                    );
+                    widget.onConfirm(updatedProfile);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                  child: const Text(
+                    'Confirm & Continue',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16.0),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// SUGGESTION ALGORITHM
+// ============================================================================
+class SuggestionEngine {
+  static List<Goal> getSuggestedGoals(List<Goal> allGoals, List<Domain> domains) {
+    // Filter to only available goals (not on cooldown)
+    final availableGoals = allGoals.where((g) => g.isAvailable()).toList();
+    
+    if (availableGoals.isEmpty) return [];
+
+    // Sort by priority:
+    // 1. Prioritize goals that benefit lowest-balance domains
+    // 2. Prefer shorter cooldown goals
+    
+    final domainValues = {for (var d in domains) d.id: d.value};
+    
+    availableGoals.sort((a, b) {
+      // Get average domain value for each goal
+      final avgA = a.domains.isEmpty 
+        ? 50.0 
+        : a.domains.fold(0.0, (sum, id) => sum + (domainValues[id] ?? 50.0)) / a.domains.length;
+      final avgB = b.domains.isEmpty 
+        ? 50.0 
+        : b.domains.fold(0.0, (sum, id) => sum + (domainValues[id] ?? 50.0)) / b.domains.length;
+      
+      // Lower average domain value = higher priority (rank first)
+      if ((avgA - avgB).abs() > 5) return avgA.compareTo(avgB);
+      
+      // Tiebreaker: prefer shorter cooldown
+      return a.cooldownDurationHours.compareTo(b.cooldownDurationHours);
+    });
+
+    // Select top 3, ensuring diversity of domains when possible
+    final selected = <Goal>[];
+    final usedDomains = <String>{};
+    
+    for (var goal in availableGoals) {
+      if (selected.length >= 3) break;
+      
+      // Prefer goals with domains not yet represented
+      final newDomains = goal.domains.where((d) => !usedDomains.contains(d)).toList();
+      if (newDomains.isNotEmpty || selected.length < 2) {
+        selected.add(goal);
+        usedDomains.addAll(goal.domains);
+      }
+    }
+    
+    // If we don't have 3, add remaining available goals
+    for (var goal in availableGoals) {
+      if (selected.length >= 3) break;
+      if (!selected.contains(goal)) {
+        selected.add(goal);
+      }
+    }
+    
+    return selected;
+  }
+}
+
+// ============================================================================
+// HOME SCREEN
+// ============================================================================
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -870,8 +1085,9 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   late List<Domain> domains;
-  late List<BalanceTask> tasks;
-  late List<bool> selectedTasks;
+  late List<Goal> goals;
+  late List<Goal> suggestedGoals;
+  late UserProfile profile;
   bool _initialized = false;
 
   @override
@@ -882,98 +1098,20 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _initializeScreen() async {
     domains = StorageService.getDomains();
+    goals = StorageService.getGoals();
+    profile = StorageService.getUserProfile();
     
     // Apply score decay
     await StorageService.applyScoreDecay(domains);
     await StorageService.saveDomains(domains);
     
-    tasks = StorageService.getTasks();
-    selectedTasks = List<bool>.filled(tasks.length, false);
+    suggestedGoals = SuggestionEngine.getSuggestedGoals(goals, domains);
     
     if (mounted) {
       setState(() {
         _initialized = true;
       });
     }
-  }
-
-  /// Get weekly theme for today
-  String _getWeeklyTheme() {
-    final weekday = DateTime.now().weekday;
-    const themes = {
-      1: 'Growth',      // Monday
-      2: 'Repair',      // Tuesday
-      3: 'Water',       // Wednesday
-      4: 'Experiment',  // Thursday
-      5: 'Community',   // Friday
-      6: 'Deep Work',   // Saturday
-      7: 'Rest',        // Sunday
-    };
-    return themes[weekday] ?? 'Balance';
-  }
-
-  /// Get day name for display
-  String _getDayName() {
-    const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    return days[DateTime.now().weekday - 1];
-  }
-
-  /// Get 2-3 suggested tasks for today based on lowest domains + weekly theme
-  List<BalanceTask> _getSuggestedTasks() {
-    final theme = _getWeeklyTheme();
-    
-    // Find 2 lowest-balance domains
-    final sortedDomains = [...domains];
-    sortedDomains.sort((a, b) => a.value.compareTo(b.value));
-    final lowestDomainIds = sortedDomains.take(2).map((d) => d.id).toSet();
-    
-    // Filter tasks that match theme or benefit low domains
-    final suggestedTasks = tasks
-        .where((task) {
-          // Don't suggest completed tasks
-          if (task.completed) return false;
-          
-          // Match weekly theme
-          if (task.weeklyTheme == theme) return true;
-          
-          // Match lowest balance domains
-          if (task.benefitDomains.any((id) => lowestDomainIds.contains(id))) return true;
-          
-          return false;
-        })
-        .toList();
-    
-    // Return top 2-3 suggestions
-    return suggestedTasks.take(3).toList();
-  }
-
-  Widget _buildCheckInButton() {
-    final canCheckIn = StorageService.canCheckIn();
-    final minutesUntil = StorageService.getMinutesUntilNextCheckIn();
-
-    return ElevatedButton.icon(
-      onPressed: canCheckIn ? () => _showCheckInDialog() : null,
-      icon: const Icon(Icons.assignment_turned_in),
-      label: Text(canCheckIn ? 'Check In Now' : 'Check In in ${minutesUntil}m'),
-      style: ElevatedButton.styleFrom(
-        backgroundColor: canCheckIn ? Colors.green : Colors.grey[300],
-        foregroundColor: canCheckIn ? Colors.white : Colors.grey[600],
-        disabledBackgroundColor: Colors.grey[300],
-        disabledForegroundColor: Colors.grey[600],
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-      ),
-    );
-  }
-
-  Widget _buildCheckInTimeDisplay() {
-    final duration = StorageService.getTimeSinceCheckIn();
-    final hours = duration.inHours;
-    final minutes = duration.inMinutes % 60;
-    
-    return Text(
-      'Last check-in: ${hours}h ${minutes}m ago',
-      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
-    );
   }
 
   String _getSimpleFeedback() {
@@ -984,161 +1122,182 @@ class _HomeScreenState extends State<HomeScreen> {
     final lowestDomain = sortedDomains.first;
     final maxDiff = (sortedDomains.last.value - sortedDomains.first.value).abs();
     
+    // Context-aware feedback based on user settings
     if (avg < 25) {
       return 'You are depleted. Rest and nurture yourself.';
     } else if (avg < 40) {
+      // Customize by biome
+      if (profile.biome == 'desert') {
+        return 'Water systems need attention in dry climates.';
+      } else if (profile.biome == 'boreal' || profile.biome == 'mountain') {
+        return 'Cold climate prep is important right now.';
+      }
       return '${lowestDomain.name} needs your attention.';
     } else if (maxDiff > 50) {
+      // Customize by acreage
+      if (profile.acreage > 2) {
+        return 'Land maintenance is falling behind.';
+      } else if (profile.acreage <= 0.25) {
+        return 'Focus on efficient use of limited space.';
+      }
       return 'Drift detected in ${lowestDomain.name}.';
     } else if (maxDiff < 15) {
       return 'You are in balance.';
     } else {
+      // Customize by urban status
+      if (profile.urbanStatus == 'rural') {
+        return 'Check in with nearby community.';
+      }
       return 'Working towards harmony.';
     }
   }
 
-  void _showCheckInDialog() {
-    final timeSinceCheckIn = StorageService.getTimeSinceCheckIn();
-    final hoursElapsed = timeSinceCheckIn.inMinutes / 60.0;
-    
-    final selectedDomains = <String>{};
-    String selectedIntensity = 'Medium'; // Default
-    
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('What did you give your time to?'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildSuggestedGoalCard(Goal goal) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10.0),
+      elevation: 0,
+      color: Colors.blue[50],
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                Text(
-                  'Since your last check-in (${timeSinceCheckIn.inHours}h ${timeSinceCheckIn.inMinutes % 60}m ago)',
-                  style: Theme.of(context).textTheme.bodySmall,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        goal.title,
+                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                      ),
+                      const SizedBox(height: 4.0),
+                      Row(
+                        children: goal.domains.map((domainId) {
+                          final domain = domains.firstWhere((d) => d.id == domainId);
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 6.0),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: domain.color.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                domain.name,
+                                style: TextStyle(fontSize: 11, color: domain.color, fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 16.0),
-                
-                // Domain selection
-                ...domains.map((domain) => CheckboxListTile(
-                  title: Text(domain.name, style: TextStyle(fontWeight: FontWeight.w600, color: domain.color)),
-                  value: selectedDomains.contains(domain.id),
-                  onChanged: (value) {
-                    setDialogState(() {
-                      if (value == true) {
-                        selectedDomains.add(domain.id);
-                      } else {
-                        selectedDomains.remove(domain.id);
-                      }
-                    });
-                  },
-                  dense: true,
-                )),
-                
-                const SizedBox(height: 16.0),
-                
-                // Intensity selector
-                Text('Intensity', style: Theme.of(context).textTheme.labelMedium?.copyWith(fontWeight: FontWeight.w600)),
-                const SizedBox(height: 8.0),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: ['Low', 'Medium', 'High'].map((intensity) {
-                    return ChoiceChip(
-                      label: Text(intensity),
-                      selected: selectedIntensity == intensity,
-                      onSelected: (selected) {
-                        setDialogState(() {
-                          if (selected) selectedIntensity = intensity;
-                        });
-                      },
-                    );
-                  }).toList(),
+                ElevatedButton(
+                  onPressed: () => _completeGoal(goal),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue[300],
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  child: const Text('Done', style: TextStyle(fontSize: 12)),
                 ),
               ],
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                _completeCheckIn(selectedDomains, hoursElapsed, selectedIntensity);
-              },
-              child: const Text('Complete'),
-            ),
+            if (goal.description != null) ...[
+              const SizedBox(height: 8.0),
+              GestureDetector(
+                onTap: () => _showGoalDescription(goal),
+                child: Text(
+                  goal.description!,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey[700],
+                    fontStyle: FontStyle.italic,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Center(
+                child: Text(
+                  'Tap to expand',
+                  style: TextStyle(fontSize: 10, color: Colors.blue[400]),
+                ),
+              ),
+            ],
           ],
         ),
       ),
     );
   }
 
-  void _completeCheckIn(Set<String> selectedDomainIds, double hoursElapsed, String intensity) {
+  void _showGoalDescription(Goal goal) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(goal.title),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (goal.description != null) ...[
+                Text(goal.description!, style: const TextStyle(height: 1.5)),
+                const SizedBox(height: 16.0),
+              ],
+              Text(
+                'Domains: ${goal.domains.map((id) => domains.firstWhere((d) => d.id == id).name).join(', ')}',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8.0),
+              const Text('Impact by domain:'),
+              ...goal.domainImpacts.entries.map((e) {
+                final domain = domains.firstWhere((d) => d.id == e.key);
+                final value = e.value;
+                final sign = value > 0 ? '+' : '';
+                return Text('  ${domain.name}: $sign$value');
+              }),
+              const SizedBox(height: 8.0),
+              Text('Cooldown: ${goal.getCooldownStatus()}'),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
+  void _completeGoal(Goal goal) {
     setState(() {
-      // Calculate base multiplier based on time elapsed
-      double timeMultiplier;
-      if (hoursElapsed < 1) {
-        timeMultiplier = 1.0; // 15-60 min = small gain
-      } else if (hoursElapsed < 3) {
-        timeMultiplier = 1.5; // 1-3 hrs = medium gain
-      } else {
-        timeMultiplier = 2.0; // 3+ hrs = larger gain
-      }
-
-      // Intensity multiplier (Low=0.5, Medium=1.0, High=1.5)
-      final intensityMultiplier = intensity == 'Low' ? 0.5 : intensity == 'High' ? 1.5 : 1.0;
-
-      // Award points for selected domains
-      for (var domainId in selectedDomainIds) {
-        final domain = domains.firstWhere((d) => d.id == domainId);
-        final pointGain = 5 * timeMultiplier * intensityMultiplier;
-        domain.value = min(100.0, domain.value + pointGain);
-      }
-
-      // Auto-complete relevant tasks
-      for (var task in tasks) {
-        if (task.completed) continue;
-        
-        final benefitsSelected = task.benefitDomains.any((id) => selectedDomainIds.contains(id));
-        if (benefitsSelected) {
-          task.completed = true;
-          task.completedAt = DateTime.now();
+      goal.lastCompletedTime = DateTime.now();
+      
+      // Award points based on domain-specific impacts
+      for (final domain in domains) {
+        if (goal.domainImpacts.containsKey(domain.id)) {
+          final impact = goal.domainImpacts[domain.id]!.toDouble();
+          domain.value = (domain.value + impact).clamp(0.0, 100.0);
         }
       }
     });
 
+    StorageService.saveGoals(goals);
     StorageService.saveDomains(domains);
-    StorageService.saveTasks(tasks);
-    StorageService.saveLastCheckIn(DateTime.now());
-  }
-
-  void _quickCompleteTask(BalanceTask task) {
+    
+    // Refresh suggestions
     setState(() {
-      task.completed = true;
-      task.completedAt = DateTime.now();
-      
-      // Award points to benefit domains
-      for (var domainId in task.benefitDomains) {
-        final domain = domains.firstWhere((d) => d.id == domainId);
-        domain.value = min(100.0, domain.value + (task.impactValue * 0.75).toDouble());
-      }
-      
-      // Apply tradeoffs
-      for (var domainId in task.tradeoffDomains) {
-        final domain = domains.firstWhere((d) => d.id == domainId);
-        domain.value = max(0.0, domain.value - (task.impactValue * 0.3).toDouble());
-      }
+      suggestedGoals = SuggestionEngine.getSuggestedGoals(goals, domains);
     });
-
-    StorageService.saveDomains(domains);
-    StorageService.saveTasks(tasks);
     
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Completed: ${task.title}'), duration: const Duration(seconds: 2)),
+      SnackBar(
+        content: Text('Completed: ${goal.title}'),
+        duration: const Duration(seconds: 2),
+      ),
     );
   }
 
@@ -1146,17 +1305,16 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     if (!_initialized) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Earthling Root v0.5')),
+        appBar: AppBar(title: const Text('Earthling Root')),
         body: const Center(child: CircularProgressIndicator()),
       );
     }
 
     final values = domains.map((d) => d.value).toList();
-    final suggestedTasks = _getSuggestedTasks();
     
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Earthling Root v0.5'),
+        title: const Text('Earthling Root'),
         elevation: 0,
         centerTitle: true,
       ),
@@ -1175,26 +1333,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     borderRadius: BorderRadius.circular(8.0),
                     border: Border.all(color: Colors.green[200]!, width: 1),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Text(
-                        '${_getDayName()} - ${_getWeeklyTheme()}',
-                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                          color: Colors.green[700],
-                        ),
-                      ),
-                      const SizedBox(height: 6.0),
-                      Text(
-                        _getSimpleFeedback(),
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: Colors.green[800],
-                          height: 1.4,
-                        ),
-                      ),
-                    ],
+                  child: Text(
+                    _getSimpleFeedback(),
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Colors.green[800],
+                      height: 1.4,
+                    ),
                   ),
                 ),
               ),
@@ -1202,18 +1347,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
               // Radar Chart (PRIMARY)
               Center(
-                child: Column(
-                  children: [
-                    SizedBox(
-                      width: 280,
-                      height: 280,
-                      child: CustomPaint(
-                        painter: RadarChartPainter(domains: domains, values: values),
-                      ),
-                    ),
-                    const SizedBox(height: 8.0),
-                    _buildCheckInTimeDisplay(),
-                  ],
+                child: SizedBox(
+                  width: 280,
+                  height: 280,
+                  child: CustomPaint(
+                    painter: RadarChartPainter(domains: domains, values: values),
+                  ),
                 ),
               ),
               const SizedBox(height: 20.0),
@@ -1252,61 +1391,27 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               )),
-              const SizedBox(height: 20.0),
-
-              // Check-in Button
-              Center(
-                child: _buildCheckInButton(),
-              ),
               const SizedBox(height: 24.0),
 
-              // Suggested Tasks
-              if (suggestedTasks.isNotEmpty) ...[
-                Text(
-                  'Today\'s Rituals',
-                  style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600, color: Colors.grey[600]),
-                ),
-                const SizedBox(height: 12.0),
-                ...suggestedTasks.map((task) => Card(
-                  margin: const EdgeInsets.only(bottom: 10.0),
-                  elevation: 0,
-                  color: Colors.blue[50],
+              // Suggested Goals
+              Text(
+                'What to tend next',
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600, color: Colors.grey[600]),
+              ),
+              const SizedBox(height: 12.0),
+              if (suggestedGoals.isEmpty)
+                Center(
                   child: Padding(
-                    padding: const EdgeInsets.all(12.0),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                task.title,
-                                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-                              ),
-                              const SizedBox(height: 4.0),
-                              if (task.weeklyTheme != null)
-                                Text(
-                                  'Theme: ${task.weeklyTheme}',
-                                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                                ),
-                            ],
-                          ),
-                        ),
-                        ElevatedButton(
-                          onPressed: () => _quickCompleteTask(task),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.blue[300],
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                          ),
-                          child: const Text('Done', style: TextStyle(fontSize: 12)),
-                        ),
-                      ],
+                    padding: const EdgeInsets.symmetric(vertical: 24.0),
+                    child: Text(
+                      'All goals on cooldown. Rest well!',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey[500]),
                     ),
                   ),
-                )),
-                const SizedBox(height: 12.0),
-              ],
+                )
+              else
+                ...suggestedGoals.map((goal) => _buildSuggestedGoalCard(goal)),
+              const SizedBox(height: 12.0),
             ],
           ),
         ),
@@ -1314,6 +1419,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 }
+
 
 class GoalsScreen extends StatefulWidget {
   const GoalsScreen({super.key});
@@ -1324,78 +1430,314 @@ class GoalsScreen extends StatefulWidget {
 
 class _GoalsScreenState extends State<GoalsScreen> {
   late List<Goal> goals;
+  late List<Domain> domains;
 
   @override
   void initState() {
     super.initState();
     goals = StorageService.getGoals();
+    domains = StorageService.getDomains();
   }
 
   void _addGoal() {
-    showDialog(context: context, builder: (context) => _AddGoalDialog(onAdd: (title, isInfinite, target) {
+    showDialog(
+      context: context,
+      builder: (context) => _AddGoalDialog(
+        domains: domains,
+        onAdd: (title, selectedDomains, impactValue, cooldownHours, isRepeatable) {
           setState(() {
-            goals.add(Goal(id: DateTime.now().millisecondsSinceEpoch.toString(), title: title, isInfinite: isInfinite, targetProgress: isInfinite ? null : target));
+            goals.add(Goal(
+              id: DateTime.now().millisecondsSinceEpoch.toString(),
+              title: title,
+              domains: selectedDomains,
+              domainImpacts: {for (final domain in selectedDomains) domain: impactValue},
+              cooldownDurationHours: cooldownHours,
+              isRepeatable: isRepeatable,
+            ));
           });
           StorageService.saveGoals(goals);
           Navigator.pop(context);
-        }));
+        },
+      ),
+    );
   }
 
-  void _incrementGoal(int index) {
-    setState(() {
-      goals[index].currentProgress++;
-      if (!goals[index].isInfinite && goals[index].currentProgress >= (goals[index].targetProgress ?? 0)) goals[index].completed = true;
-    });
-    StorageService.saveGoals(goals);
+  void _editGoal(int index, Goal goal) {
+    showDialog(
+      context: context,
+      builder: (context) => _EditGoalDialog(
+        goal: goal,
+        domains: domains,
+        onEdit: (updatedGoal) {
+          setState(() {
+            goals[index] = updatedGoal;
+          });
+          StorageService.saveGoals(goals);
+          Navigator.pop(context);
+        },
+      ),
+    );
   }
 
   void _deleteGoal(int index) {
-    setState(() {
-      goals.removeAt(index);
-    });
-    StorageService.saveGoals(goals);
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Goal'),
+        content: const Text('Delete permanently? This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              setState(() {
+                goals.removeAt(index);
+              });
+              StorageService.saveGoals(goals);
+              Navigator.pop(context);
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Delete', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final repeatableGoals = goals.where((g) => g.isRepeatable).toList();
+    final finiteGoals = goals.where((g) => !g.isRepeatable).toList();
+
     return Scaffold(
       appBar: AppBar(title: const Text('Goals & Aspirations')),
       body: SingleChildScrollView(
         child: Padding(
           padding: const EdgeInsets.all(16.0),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('Finite Goals', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)), IconButton(icon: const Icon(Icons.add), onPressed: _addGoal)]),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (finiteGoals.isNotEmpty) ...[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Finite Goals',
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleLarge
+                            ?.copyWith(fontWeight: FontWeight.bold)),
+                    IconButton(icon: const Icon(Icons.add), onPressed: _addGoal),
+                  ],
+                ),
+                const SizedBox(height: 12.0),
+                ...finiteGoals.map((g) => _buildGoalTile(goals.indexOf(g), g)),
+                const SizedBox(height: 24.0),
+              ],
+              if (repeatableGoals.isNotEmpty) ...[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Repeating Goals',
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleLarge
+                            ?.copyWith(fontWeight: FontWeight.bold)),
+                    if (finiteGoals.isEmpty)
+                      IconButton(icon: const Icon(Icons.add), onPressed: _addGoal),
+                  ],
+                ),
+                const SizedBox(height: 12.0),
+                ...repeatableGoals.map((g) => _buildGoalTile(goals.indexOf(g), g)),
+              ],
+              if (goals.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 24.0),
+                  child: Center(
+                    child: Column(
+                      children: [
+                        Icon(Icons.flag_outlined, size: 48, color: Colors.grey[400]),
+                        const SizedBox(height: 12.0),
+                        Text('No goals yet',
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodyMedium
+                                ?.copyWith(color: Colors.grey[500])),
+                        const SizedBox(height: 12.0),
+                        ElevatedButton.icon(
+                          onPressed: _addGoal,
+                          icon: const Icon(Icons.add),
+                          label: const Text('Add Goal'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+      floatingActionButton: goals.isNotEmpty
+          ? FloatingActionButton(
+              onPressed: _addGoal,
+              child: const Icon(Icons.add),
+            )
+          : null,
+    );
+  }
+
+  Widget _buildGoalTile(int index, Goal goal) {
+    final cooldownStatus = goal.getCooldownStatus();
+    final isOnCooldown = !goal.isAvailable();
+
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 8.0),
+      elevation: 0,
+      color: isOnCooldown ? Colors.grey[100] : Colors.white,
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            GestureDetector(
+              onTap: () => _showGoalDetails(goal),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(goal.title,
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
+                                ?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                  color: isOnCooldown ? Colors.grey[500] : Colors.black,
+                                )),
+                        const SizedBox(height: 6.0),
+                        Wrap(
+                          spacing: 6,
+                          children: goal.domains.map((domainId) {
+                            final domain =
+                                domains.firstWhere((d) => d.id == domainId);
+                            return Chip(
+                              label: Text(domain.name,
+                                  style:
+                                      const TextStyle(fontSize: 11, color: Colors.white)),
+                              backgroundColor: domain.color,
+                              padding: const EdgeInsets.symmetric(horizontal: 6),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8.0),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text('${goal.getTotalImpact()} pts',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 12)),
+                      const SizedBox(height: 4.0),
+                      Text(cooldownStatus,
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: isOnCooldown ? Colors.grey[500] : Colors.blue)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
             const SizedBox(height: 12.0),
-            ...goals.where((g) => !g.isInfinite).map((g) => _buildGoalTile(goals.indexOf(g), g)),
-            const SizedBox(height: 24.0),
-            Text('Infinite Goals', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12.0),
-            ...goals.where((g) => g.isInfinite).map((g) => _buildGoalTile(goals.indexOf(g), g)),
-          ]),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: isOnCooldown ? null : () => _completeGoal(goal),
+                  icon: const Icon(Icons.check),
+                  label: const Text('Complete'),
+                ),
+                ElevatedButton.icon(
+                  onPressed: () => _editGoal(index, goal),
+                  icon: const Icon(Icons.edit),
+                  label: const Text('Edit'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange[700],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete, color: Colors.red),
+                  onPressed: () => _deleteGoal(index),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildGoalTile(int index, Goal goal) {
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 8.0),
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(goal.title, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold, decoration: goal.completed ? TextDecoration.lineThrough : null)), const SizedBox(height: 8.0), if (!goal.isInfinite) LinearProgressIndicator(value: goal.getPercentage() / 100, minHeight: 8.0) else Text('Progress: ${goal.currentProgress}', style: TextStyle(fontSize: 14, color: Colors.grey[600]))])), if (!goal.isInfinite) Padding(padding: const EdgeInsets.only(left: 8.0), child: Text('${goal.currentProgress}/${goal.targetProgress}', style: const TextStyle(fontWeight: FontWeight.bold)))]),
-          if (goal.completed) const Padding(padding: EdgeInsets.only(top: 8.0), child: Text('✓ Completed!', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold))),
-          const SizedBox(height: 12.0),
-          Row(mainAxisAlignment: MainAxisAlignment.end, children: [ElevatedButton.icon(onPressed: () => _incrementGoal(index), icon: const Icon(Icons.add), label: const Text('Progress')), const SizedBox(width: 8.0), IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () => _deleteGoal(index))]),
-        ]),
+  void _showGoalDetails(Goal goal) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(goal.title),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (goal.description != null) ...[
+                Text(goal.description!, style: const TextStyle(height: 1.5)),
+                const SizedBox(height: 16.0),
+              ],
+              Text(
+                'Domains: ${goal.domains.map((id) => domains.firstWhere((d) => d.id == id).name).join(', ')}',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8.0),
+              const Text('Impact by domain:'),
+              ...goal.domainImpacts.entries.map((e) {
+                final domain = domains.firstWhere((d) => d.id == e.key);
+                final value = e.value;
+                final sign = value > 0 ? '+' : '';
+                return Text('  ${domain.name}: $sign$value');
+              }),
+              const SizedBox(height: 8.0),
+              Text('Cooldown: ${goal.getCooldownStatus()}'),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+        ],
       ),
+    );
+  }
+
+  void _completeGoal(Goal goal) {
+    setState(() {
+      goal.lastCompletedTime = DateTime.now();
+      
+      for (final domain in domains) {
+        if (goal.domainImpacts.containsKey(domain.id)) {
+          final impact = goal.domainImpacts[domain.id]!.toDouble();
+          domain.value = (domain.value + impact).clamp(0.0, 100.0);
+        }
+      }
+    });
+    StorageService.saveGoals(goals);
+    StorageService.saveDomains(domains);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Completed: ${goal.title}')),
     );
   }
 }
 
 class _AddGoalDialog extends StatefulWidget {
-  final Function(String title, bool isInfinite, int? target) onAdd;
-  const _AddGoalDialog({required this.onAdd});
+  final List<Domain> domains;
+  final Function(String, List<String>, int, double, bool) onAdd;
+  const _AddGoalDialog({required this.domains, required this.onAdd});
 
   @override
   State<_AddGoalDialog> createState() => _AddGoalDialogState();
@@ -1403,20 +1745,25 @@ class _AddGoalDialog extends StatefulWidget {
 
 class _AddGoalDialogState extends State<_AddGoalDialog> {
   late TextEditingController titleController;
-  late TextEditingController targetController;
-  bool isInfinite = false;
+  late TextEditingController impactController;
+  late TextEditingController cooldownController;
+  late Set<String> selectedDomains;
+  bool isRepeatable = true;
 
   @override
   void initState() {
     super.initState();
     titleController = TextEditingController();
-    targetController = TextEditingController(text: '3');
+    impactController = TextEditingController(text: '15');
+    cooldownController = TextEditingController(text: '24');
+    selectedDomains = {};
   }
 
   @override
   void dispose() {
     titleController.dispose();
-    targetController.dispose();
+    impactController.dispose();
+    cooldownController.dispose();
     super.dispose();
   }
 
@@ -1425,19 +1772,249 @@ class _AddGoalDialogState extends State<_AddGoalDialog> {
     return AlertDialog(
       title: const Text('Add Goal'),
       content: SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          TextField(controller: titleController, decoration: const InputDecoration(labelText: 'Goal Title', hintText: 'e.g., Build 3 garden beds')),
-          const SizedBox(height: 12.0),
-          CheckboxListTile(title: const Text('Infinite Goal'), subtitle: const Text('Accumulates forever'), value: isInfinite, onChanged: (v) => setState(() => isInfinite = v ?? false)),
-          if (!isInfinite) TextField(controller: targetController, decoration: const InputDecoration(labelText: 'Target Progress', hintText: '3'), keyboardType: TextInputType.number),
-        ]),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: titleController,
+              decoration: const InputDecoration(
+                labelText: 'Goal Title',
+                hintText: 'e.g., Water the garden',
+              ),
+            ),
+            const SizedBox(height: 16.0),
+            Text('Domains', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8.0),
+            Wrap(
+              spacing: 8,
+              children: widget.domains.map((domain) {
+                final isSelected = selectedDomains.contains(domain.id);
+                return FilterChip(
+                  label: Text(domain.name),
+                  selected: isSelected,
+                  onSelected: (selected) {
+                    setState(() {
+                      if (selected) {
+                        selectedDomains.add(domain.id);
+                      } else {
+                        selectedDomains.remove(domain.id);
+                      }
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16.0),
+            TextField(
+              controller: impactController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Impact Points',
+                hintText: '15',
+              ),
+            ),
+            const SizedBox(height: 12.0),
+            TextField(
+              controller: cooldownController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Cooldown (hours)',
+                hintText: '24',
+              ),
+            ),
+            const SizedBox(height: 12.0),
+            CheckboxListTile(
+              title: const Text('Repeating Goal'),
+              value: isRepeatable,
+              onChanged: (v) => setState(() => isRepeatable = v ?? true),
+            ),
+          ],
+        ),
       ),
-      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')), ElevatedButton(onPressed: () {
-        if (titleController.text.isNotEmpty) {
-          final target = isInfinite ? null : int.tryParse(targetController.text);
-          widget.onAdd(titleController.text, isInfinite, target);
-        }
-      }, child: const Text('Add'))],
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        ElevatedButton(
+          onPressed: () {
+            if (titleController.text.isNotEmpty && selectedDomains.isNotEmpty) {
+              final impact = int.tryParse(impactController.text) ?? 15;
+              final cooldown = double.tryParse(cooldownController.text) ?? 24;
+              widget.onAdd(titleController.text, selectedDomains.toList(), impact, cooldown, isRepeatable);
+            }
+          },
+          child: const Text('Add'),
+        ),
+      ],
+    );
+  }
+}
+
+// Edit Goal Dialog
+class _EditGoalDialog extends StatefulWidget {
+  final Goal goal;
+  final List<Domain> domains;
+  final Function(Goal) onEdit;
+
+  const _EditGoalDialog({
+    required this.goal,
+    required this.domains,
+    required this.onEdit,
+  });
+
+  @override
+  State<_EditGoalDialog> createState() => _EditGoalDialogState();
+}
+
+class _EditGoalDialogState extends State<_EditGoalDialog> {
+  late TextEditingController titleController;
+  late TextEditingController descriptionController;
+  late TextEditingController cooldownController;
+  late Set<String> selectedDomains;
+  late Map<String, int> domainImpacts;
+  bool isRepeatable = true;
+
+  @override
+  void initState() {
+    super.initState();
+    titleController = TextEditingController(text: widget.goal.title);
+    descriptionController = TextEditingController(text: widget.goal.description ?? '');
+    cooldownController = TextEditingController(text: widget.goal.cooldownDurationHours.toStringAsFixed(1));
+    selectedDomains = Set.from(widget.goal.domains);
+    domainImpacts = Map.from(widget.goal.domainImpacts);
+    isRepeatable = widget.goal.isRepeatable;
+  }
+
+  @override
+  void dispose() {
+    titleController.dispose();
+    descriptionController.dispose();
+    cooldownController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit Goal'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: titleController,
+              decoration: const InputDecoration(
+                labelText: 'Goal Title',
+                hintText: 'e.g., Water the garden',
+              ),
+            ),
+            const SizedBox(height: 12.0),
+            TextField(
+              controller: descriptionController,
+              decoration: const InputDecoration(
+                labelText: 'Description (Optional)',
+                hintText: 'Add more details...',
+              ),
+              maxLines: 3,
+            ),
+            const SizedBox(height: 16.0),
+            Text('Domains', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8.0),
+            Wrap(
+              spacing: 8,
+              children: widget.domains.map((domain) {
+                final isSelected = selectedDomains.contains(domain.id);
+                return FilterChip(
+                  label: Text(domain.name),
+                  selected: isSelected,
+                  onSelected: (selected) {
+                    setState(() {
+                      if (selected) {
+                        selectedDomains.add(domain.id);
+                        domainImpacts[domain.id] = 5; // Default impact
+                      } else {
+                        selectedDomains.remove(domain.id);
+                        domainImpacts.remove(domain.id);
+                      }
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16.0),
+            Text('Impact per Domain', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8.0),
+            ...selectedDomains.map((domainId) {
+              final domain = widget.domains.firstWhere((d) => d.id == domainId);
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8.0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(domain.name),
+                    ),
+                    SizedBox(
+                      width: 60,
+                      child: TextField(
+                        keyboardType: TextInputType.number,
+                        decoration: InputDecoration(
+                          hintText: '${domainImpacts[domainId] ?? 5}',
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
+                        ),
+                        onChanged: (value) {
+                          final impact = int.tryParse(value);
+                          if (impact != null) {
+                            domainImpacts[domainId] = impact;
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+            const SizedBox(height: 12.0),
+            TextField(
+              controller: cooldownController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Cooldown (hours)',
+                hintText: '24',
+              ),
+            ),
+            const SizedBox(height: 12.0),
+            CheckboxListTile(
+              title: const Text('Repeating Goal'),
+              value: isRepeatable,
+              onChanged: (v) => setState(() => isRepeatable = v ?? true),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        ElevatedButton(
+          onPressed: () {
+            if (titleController.text.isNotEmpty && selectedDomains.isNotEmpty) {
+              final updatedGoal = Goal(
+                id: widget.goal.id,
+                title: titleController.text,
+                description: descriptionController.text.isNotEmpty ? descriptionController.text : null,
+                domains: selectedDomains.toList(),
+                domainImpacts: domainImpacts,
+                cooldownDurationHours: double.tryParse(cooldownController.text) ?? 24,
+                isRepeatable: isRepeatable,
+                lastCompletedTime: widget.goal.lastCompletedTime,
+              );
+              widget.onEdit(updatedGoal);
+            }
+          },
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.orange[700]),
+          child: const Text('Save'),
+        ),
+      ],
     );
   }
 }
